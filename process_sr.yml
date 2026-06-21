@@ -1,10 +1,11 @@
 #################################################
-# ✅ PLAY 1: SERVICENOW → GET LATEST HOST
+# ✅ PLAY 1: GET HOST FROM SERVICENOW (NO SUDO)
 #################################################
 
 - name: Get target host from ServiceNow
   hosts: localhost
   gather_facts: no
+  become: no    # ✅ VERY IMPORTANT (fix sudo error)
 
   vars:
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
@@ -13,7 +14,7 @@
   tasks:
 
     #################################################
-    # ✅ GET LATEST SR BASED ON DESCRIPTION
+    # ✅ GET LATEST SR
     #################################################
 
     - name: Get latest SR
@@ -28,19 +29,15 @@
 
     - name: Debug SR
       debug:
-        msg: "SR = {{ sn.json.result[0].number }} | {{ sn.json.result[0].short_description }}"
+        msg: "SR={{ sn.json.result[0].number }} | {{ sn.json.result[0].short_description }}"
 
     #################################################
-    # ✅ EXTRACT SYS_ID
+    # ✅ GET HOSTNAME VARIABLE
     #################################################
 
     - name: Extract sys_id
       set_fact:
         request_sys_id: "{{ sn.json.result[0].sys_id }}"
-
-    #################################################
-    # ✅ GET HOSTNAME FROM VARIABLES
-    #################################################
 
     - name: Get mtom
       uri:
@@ -63,7 +60,7 @@
       register: opt
 
     #################################################
-    # ✅ FINAL HOST FROM SERVICENOW
+    # ✅ FINAL TARGET HOST
     #################################################
 
     - name: Set target host
@@ -72,7 +69,7 @@
 
     - name: Validate hostname
       fail:
-        msg: "❌ Hostname not found"
+        msg: "❌ Hostname not found in SR"
       when: target_host is not defined or target_host == ""
 
     - name: Debug target host
@@ -80,7 +77,7 @@
         msg: "TARGET HOST = {{ target_host }}"
 
     #################################################
-    # ✅ PASS HOST TO NEXT PLAY ✅ (IMPORTANT FIX)
+    # ✅ PASS TO NEXT PLAY (AAP SAFE)
     #################################################
 
     - name: Pass host to next play
@@ -90,7 +87,7 @@
 
 
 #################################################
-# ✅ PLAY 2: RUN ON CORRECT INVENTORY HOST
+# ✅ PLAY 2: INSTALL DATADOG ON CORRECT HOST
 #################################################
 
 - name: Install Datadog Agent
@@ -102,7 +99,7 @@
   tasks:
 
     #################################################
-    # ✅ CONFIRM CORRECT HOST ✅
+    # ✅ VERIFY CORRECT TARGET
     #################################################
 
     - name: Confirm execution host
@@ -123,7 +120,7 @@
         msg: "Installed = {{ dd.stat.exists }}"
 
     #################################################
-    # ✅ CLEAN OLD FILES (MULTI-OS)
+    # ✅ CLEAN OLD CONFIG (MULTI-OS SAFE)
     #################################################
 
     - name: Remove Debian keyring
@@ -151,7 +148,7 @@
         - not dd.stat.exists
 
     #################################################
-    # ✅ DOWNLOAD SCRIPT
+    # ✅ DOWNLOAD INSTALL SCRIPT
     #################################################
 
     - name: Download Datadog installer
@@ -181,7 +178,7 @@
       when: not dd.stat.exists
 
     #################################################
-    # ✅ START SERVICE
+    # ✅ ENSURE SERVICE IS RUNNING
     #################################################
 
     - name: Ensure Datadog agent running
@@ -191,7 +188,7 @@
         enabled: yes
 
     #################################################
-    # ✅ VERIFY
+    # ✅ VERIFY SERVICE
     #################################################
 
     - name: Check service status

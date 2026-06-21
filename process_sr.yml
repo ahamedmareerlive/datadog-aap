@@ -48,7 +48,7 @@
         return_content: yes
       register: option_response
 
-    - name: Set hostname
+    - name: Set target hostname
       set_fact:
         target_host: "{{ option_response.json.result.value }}"
 
@@ -64,14 +64,13 @@
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG AGENT
+# ✅ PLAY 2: INSTALL DATADOG AGENT (FINAL ✅)
 #################################################
 
 - name: Install Datadog Agent
   hosts: dynamic_targets
-  become: yes
-  become_method: su   # ✅ FIX FOR NO SUDO
   gather_facts: yes
+  become: no   # ✅ IMPORTANT FIX (no sudo/su issues)
 
   tasks:
 
@@ -85,7 +84,7 @@
       when: datadog_api_key is not defined or datadog_api_key == ""
 
     #################################################
-    # ✅ CHECK IF ALREADY INSTALLED
+    # ✅ CHECK EXISTING INSTALL
     #################################################
 
     - name: Check Datadog installation
@@ -98,20 +97,8 @@
         msg: "Already installed = {{ dd_installed.stat.exists }}"
 
     #################################################
-    # ✅ CLEAN OLD DATADOG FILES (CRITICAL)
+    # ✅ CLEAN OLD FILES (CRITICAL FIX)
     #################################################
-
-    - name: Remove old repo
-      file:
-        path: /etc/apt/sources.list.d/datadog.list
-        state: absent
-      when: ansible_os_family == "Debian"
-
-    - name: Remove old keyring
-      file:
-        path: /usr/share/keyrings/datadog-archive-keyring.gpg
-        state: absent
-      when: ansible_os_family == "Debian"
 
     - name: Remove old script
       file:
@@ -160,9 +147,9 @@
         enabled: yes
 
     #################################################
-    # ✅ SUCCESS MESSAGE
+    # ✅ SUCCESS
     #################################################
 
-    - name: Success
+    - name: Success message
       debug:
         msg: "✅ Datadog Agent installed successfully on {{ inventory_hostname }}"

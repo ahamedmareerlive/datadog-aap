@@ -66,10 +66,6 @@
         password: "{{ snow_password }}"
       register: mtom
 
-    #################################################
-    # ✅ PICK LATEST VARIABLE
-    #################################################
-
     - name: Sort variables
       set_fact:
         sorted_mtom: "{{ mtom.json.result | sort(attribute='sys_created_on') }}"
@@ -78,11 +74,7 @@
       set_fact:
         option_sys_id: "{{ sorted_mtom[-1].sc_item_option.value }}"
 
-    #################################################
-    # ✅ GET HOSTNAME
-    #################################################
-
-    - name: Get hostname value
+    - name: Get hostname
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
         method: GET
@@ -97,18 +89,10 @@
     - debug:
         msg: "✅ TARGET HOST = {{ target_host }}"
 
-    #################################################
-    # ✅ VALIDATE HOST
-    #################################################
-
     - name: Validate host
       fail:
         msg: "❌ Invalid host {{ target_host }}"
       when: target_host not in groups['all']
-
-    #################################################
-    # ✅ ADD HOST
-    #################################################
 
     - name: Add dynamic host
       add_host:
@@ -118,7 +102,7 @@
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG (ROBUST ✅)
+# ✅ PLAY 2: INSTALL DATADOG (FIXED ✅)
 #################################################
 
 - name: Install Datadog
@@ -128,26 +112,47 @@
 
   tasks:
 
-    - name: Confirm host
-      debug:
+    - debug:
         msg: "🚀 Running on {{ inventory_hostname }}"
-
-    #################################################
-    # ✅ INSTALL BLOCK (ROBUST)
-    #################################################
 
     - block:
 
-        - name: Fix apt cache issues (Debian)
+        #################################################
+        # ✅ FIX PACKAGE ISSUES
+        #################################################
+
+        - name: Fix dpkg issues
+          shell: |
+            rm -f /var/lib/dpkg/lock-frontend
+            rm -f /var/lib/dpkg/lock
+            dpkg --configure -a
+
+        - name: Clean apt cache
           shell: |
             rm -rf /var/lib/apt/lists/*
             apt-get clean
-          when: ansible_os_family == "Debian"
 
         - name: Update apt cache
           apt:
             update_cache: yes
-          when: ansible_os_family == "Debian"
+
+        #################################################
+        # ✅ REMOVE OLD DATADOG CONFIG
+        #################################################
+
+        - name: Remove Datadog repo
+          file:
+            path: /etc/apt/sources.list.d/datadog.list
+            state: absent
+
+        - name: Remove Datadog key
+          file:
+            path: /usr/share/keyrings/datadog-archive-keyring.gpg
+            state: absent
+
+        #################################################
+        # ✅ DOWNLOAD SCRIPT
+        #################################################
 
         - name: Download installer
           get_url:
@@ -155,14 +160,29 @@
             dest: /tmp/datadog_install.sh
             mode: '0755'
 
-        - name: Install Datadog
+        #################################################
+        # ✅ INSTALL
+        #################################################
+
+        - name: Install Datadog Agent
           shell: |
+            set -x
             DD_API_KEY={{ datadog_api_key }} \
             DD_SITE="us5.datadoghq.com" \
             DD_AGENT_MAJOR_VERSION=7 \
             bash /tmp/datadog_install.sh
+          register: install_output
+          args:
+            executable: /bin/bash
 
-        - name: Ensure service
+        - debug:
+            var: install_output.stdout_lines
+
+        #################################################
+        # ✅ START SERVICE
+        #################################################
+
+        - name: Ensure Datadog running
           service:
             name: datadog-agent
             state: started
@@ -174,12 +194,10 @@
 
       rescue:
 
-        - name: Log failure
-          debug:
+        - debug:
             msg: "❌ Datadog installation failed"
 
-        - name: Mark failure
-          set_fact:
+        - set_fact:
             install_success: false
 
 
@@ -239,4 +257,3 @@
           state: "-5"
           work_notes: "❌ Datadog installation failed via AAP"
       when: not (hostvars['dynamic_targets'][0].install_success | default(false))
-

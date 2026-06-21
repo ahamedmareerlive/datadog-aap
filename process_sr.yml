@@ -1,17 +1,4 @@
 #################################################
-# ✅ GLOBAL VARS
-#################################################
-
-- name: GLOBAL VARS HOLDER
-  hosts: localhost
-  gather_facts: no
-  vars:
-    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
-    search_text: "Datadog"
-  tasks: []
-
-
-#################################################
 # ✅ PLAY 1: GET SR + SET IN PROGRESS
 #################################################
 
@@ -22,22 +9,28 @@
 
   vars:
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
+    search_text: "Datadog"
 
   tasks:
 
-    ############################
+    #################################################
     # ✅ GET LATEST SR
-    ############################
+    #################################################
 
     - name: Get latest SR
       uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=short_descriptionLIKEDatadog^active=true^state=1&sysparm_order_by_desc=sys_created_on&sysparm_limit=1"
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=short_descriptionLIKE{{ search_text }}^active=true^stateIN1,2&sysparm_order_by_desc=sys_created_on&sysparm_limit=1"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
         force_basic_auth: yes
         return_content: yes
       register: sn
+
+    - name: Validate SR exists
+      fail:
+        msg: "❌ No matching SR found"
+      when: sn.json.result | length == 0
 
     - name: Extract IDs
       set_fact:
@@ -47,9 +40,9 @@
     - debug:
         msg: "✅ Selected Ticket = {{ sn.json.result[0].number }}"
 
-    ############################
+    #################################################
     # ✅ SET RITM → IN PROGRESS
-    ############################
+    #################################################
 
     - name: Set RITM to In Progress
       uri:
@@ -61,9 +54,9 @@
         body:
           state: "2"
 
-    ############################
+    #################################################
     # ✅ GET VARIABLES
-    ############################
+    #################################################
 
     - name: Get variables
       uri:
@@ -73,9 +66,9 @@
         password: "{{ snow_password }}"
       register: mtom
 
-    ############################
+    #################################################
     # ✅ PICK LATEST VARIABLE
-    ############################
+    #################################################
 
     - name: Sort variables
       set_fact:
@@ -85,9 +78,9 @@
       set_fact:
         option_sys_id: "{{ sorted_mtom[-1].sc_item_option.value }}"
 
-    ############################
-    # ✅ GET HOST
-    ############################
+    #################################################
+    # ✅ GET HOSTNAME
+    #################################################
 
     - name: Get hostname value
       uri:
@@ -97,25 +90,25 @@
         password: "{{ snow_password }}"
       register: opt
 
-    - name: Set host
+    - name: Set target host
       set_fact:
         target_host: "{{ opt.json.result.value }}"
 
     - debug:
         msg: "✅ TARGET HOST = {{ target_host }}"
 
-    ############################
+    #################################################
     # ✅ VALIDATE HOST
-    ############################
+    #################################################
 
     - name: Validate host
       fail:
         msg: "❌ Invalid host {{ target_host }}"
       when: target_host not in groups['all']
 
-    ############################
+    #################################################
     # ✅ ADD HOST
-    ############################
+    #################################################
 
     - name: Add dynamic host
       add_host:
@@ -125,7 +118,7 @@
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG
+# ✅ PLAY 2: INSTALL DATADOG (ROBUST ✅)
 #################################################
 
 - name: Install Datadog
@@ -139,28 +132,37 @@
       debug:
         msg: "🚀 Running on {{ inventory_hostname }}"
 
+    #################################################
+    # ✅ INSTALL BLOCK (ROBUST)
+    #################################################
+
     - block:
 
-        - name: Check installation
-          stat:
-            path: /etc/datadog-agent/datadog.yaml
-          register: dd
+        - name: Fix apt cache issues (Debian)
+          shell: |
+            rm -rf /var/lib/apt/lists/*
+            apt-get clean
+          when: ansible_os_family == "Debian"
+
+        - name: Update apt cache
+          apt:
+            update_cache: yes
+          when: ansible_os_family == "Debian"
 
         - name: Download installer
           get_url:
             url: https://install.datadoghq.com/scripts/install_script_agent7.sh
             dest: /tmp/datadog_install.sh
             mode: '0755'
-          when: not dd.stat.exists
 
         - name: Install Datadog
           shell: |
             DD_API_KEY={{ datadog_api_key }} \
             DD_SITE="us5.datadoghq.com" \
+            DD_AGENT_MAJOR_VERSION=7 \
             bash /tmp/datadog_install.sh
-          when: not dd.stat.exists
 
-        - name: Start service
+        - name: Ensure service
           service:
             name: datadog-agent
             state: started
@@ -172,13 +174,17 @@
 
       rescue:
 
+        - name: Log failure
+          debug:
+            msg: "❌ Datadog installation failed"
+
         - name: Mark failure
           set_fact:
             install_success: false
 
 
 #################################################
-# ✅ PLAY 3: UPDATE SERVICENOW STATUS
+# ✅ PLAY 3: UPDATE SERVICENOW
 #################################################
 
 - name: Update ServiceNow
@@ -204,6 +210,7 @@
         body_format: json
         body:
           state: "3"
+          work_notes: "✅ Datadog installed successfully via AAP"
       when: hostvars['dynamic_targets'][0].install_success | default(false)
 
     - name: Close REQUEST
@@ -230,4 +237,6 @@
         body_format: json
         body:
           state: "-5"
+          work_notes: "❌ Datadog installation failed via AAP"
       when: not (hostvars['dynamic_targets'][0].install_success | default(false))
+

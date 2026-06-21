@@ -14,16 +14,12 @@
   tasks:
 
     #################################################
-    # ✅ GET LATEST OPEN SR ONLY ✅
+    # ✅ GET LATEST OPEN SR (NO SPACE URL ✅)
     #################################################
 
     - name: Get latest SR
       uri:
-        url: >-
-          https://{{ servicenow_instance }}/api/now/table/sc_req_item
-          ?sysparm_query=short_descriptionLIKE{{ search_text }}^active=true^state=1
-          &sysparm_order_by_desc=sys_created_on
-          &sysparm_limit=1
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=short_descriptionLIKE{{ search_text }}^active=true^state=1&sysparm_order_by_desc=sys_created_on&sysparm_limit=1"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
@@ -32,7 +28,7 @@
       register: sn
 
     #################################################
-    # ✅ DEBUG SR (VERY IMPORTANT)
+    # ✅ SHOW WHICH TICKET IS PICKED
     #################################################
 
     - name: Show selected SR
@@ -47,7 +43,8 @@
     # ✅ EXTRACT SYS_ID
     #################################################
 
-    - set_fact:
+    - name: Extract sys_id
+      set_fact:
         request_sys_id: "{{ sn.json.result[0].sys_id }}"
 
     #################################################
@@ -63,17 +60,19 @@
       register: mtom
 
     #################################################
-    # ✅ DEBUG VARIABLES
+    # ✅ DEBUG VARIABLES (IMPORTANT)
     #################################################
 
-    - debug:
+    - name: Show variables
+      debug:
         var: mtom.json.result
 
     #################################################
-    # ✅ EXTRACT HOSTNAME VALUE
+    # ✅ GET HOSTNAME VALUE
     #################################################
 
-    - set_fact:
+    - name: Extract option sys_id
+      set_fact:
         option_sys_id: "{{ mtom.json.result[0].sc_item_option.value }}"
 
     - name: Get hostname
@@ -84,28 +83,29 @@
         password: "{{ snow_password }}"
       register: opt
 
-    - set_fact:
+    - name: Set target host
+      set_fact:
         target_host: "{{ opt.json.result.value }}"
 
     #################################################
-    # ✅ SHOW FINAL VALUE
+    # ✅ SHOW FINAL HOST VALUE
     #################################################
 
     - name: Show hostname from SR
       debug:
-        msg: "✅ Host picked = {{ target_host }}"
+        msg: "✅ Host picked from ServiceNow = {{ target_host }}"
 
     #################################################
     # ✅ VALIDATION
     #################################################
 
-    - name: Validate host
+    - name: Validate host exists
       fail:
         msg: "❌ Host not found in inventory → {{ target_host }}"
       when: target_host not in groups['all']
 
     #################################################
-    # ✅ ADD HOST
+    # ✅ ADD HOST WITH REAL CONNECTION
     #################################################
 
     - name: Add dynamic host
@@ -116,27 +116,61 @@
 
 
 #################################################
-# ✅ PLAY 2: RUN ON CORRECT HOST
+# ✅ PLAY 2: INSTALL DATADOG
 #################################################
 
-- name: Install Datadog
+- name: Install Datadog Agent
   hosts: dynamic_targets
   gather_facts: yes
   become: yes
+  become_method: sudo
 
   tasks:
 
-    - name: Confirm host
+    #################################################
+    # ✅ CONFIRM TARGET HOST
+    #################################################
+
+    - name: Confirm execution host
       debug:
         msg: "🚀 Running on {{ inventory_hostname }}"
 
-    - name: Check install
+    #################################################
+    # ✅ CHECK INSTALL
+    #################################################
+
+    - name: Check Datadog
       stat:
         path: /etc/datadog-agent/datadog.yaml
       register: dd
 
-    - debug:
+    - name: Show install status
+      debug:
         msg: "Installed = {{ dd.stat.exists }}"
+
+    #################################################
+    # ✅ CLEAN OLD CONFIG
+    #################################################
+
+    - name: Remove Debian keyring
+      file:
+        path: /usr/share/keyrings/datadog-archive-keyring.gpg
+        state: absent
+      when:
+        - ansible_os_family == "Debian"
+        - not dd.stat.exists
+
+    - name: Remove RHEL repo
+      file:
+        path: /etc/yum.repos.d/datadog.repo
+        state: absent
+      when:
+        - ansible_os_family == "RedHat"
+        - not dd.stat.exists
+
+    #################################################
+    # ✅ DOWNLOAD INSTALLER
+    #################################################
 
     - name: Download installer
       get_url:
@@ -145,22 +179,46 @@
         mode: '0755'
       when: not dd.stat.exists
 
+    #################################################
+    # ✅ INSTALL DATADOG
+    #################################################
+
     - name: Install Datadog
       shell: |
         DD_API_KEY={{ datadog_api_key }} \
         DD_SITE="us5.datadoghq.com" \
+        DD_AGENT_MAJOR_VERSION=7 \
         bash /tmp/datadog_install.sh
+      args:
+        executable: /bin/bash
       when: not dd.stat.exists
 
-    - name: Ensure service
+    #################################################
+    # ✅ START SERVICE
+    #################################################
+
+    - name: Ensure Datadog running
       service:
         name: datadog-agent
         state: started
         enabled: yes
 
-    - name: Verify
-      shell: systemctl is-active datadog-agent
-      register: status
+    #################################################
+    # ✅ VERIFY STATUS
+    #################################################
 
-    - debug:
-        msg: "✅ Datadog status = {{ status.stdout }}"
+    - name: Check service status
+      shell: systemctl is-active datadog-agent
+      register: dd_status
+
+    - name: Show service status
+      debug:
+        msg: "✅ Datadog service = {{ dd_status.stdout }}"
+
+    #################################################
+    # ✅ FINAL SUCCESS
+    #################################################
+
+    - name: Final success
+      debug:
+        msg: "✅ Datadog installed successfully on {{ inventory_hostname }}"

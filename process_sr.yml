@@ -96,7 +96,7 @@
       register: dd_installed
 
     #################################################
-    # ✅ DEBIAN / UBUNTU (FINAL FIX ✅)
+    # ✅ DEBIAN / UBUNTU (FINAL FIX ✅✅✅)
     #################################################
 
     - name: Install prerequisites
@@ -121,16 +121,25 @@
         - ansible_os_family == "Debian"
         - not dd_installed.stat.exists
 
-    - name: Download Datadog GPG key ✅ CORRECT URL
+    - name: Download Datadog GPG key (ASCII)
       get_url:
         url: https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public
-        dest: /usr/share/keyrings/datadog-archive-keyring.gpg
+        dest: /tmp/datadog.asc
         mode: '0644'
       when:
         - ansible_os_family == "Debian"
         - not dd_installed.stat.exists
 
-    - name: Add Datadog repository
+    - name: Convert key to binary ✅ IMPORTANT
+      command: >
+        gpg --dearmor -o /usr/share/keyrings/datadog-archive-keyring.gpg /tmp/datadog.asc
+      args:
+        creates: /usr/share/keyrings/datadog-archive-keyring.gpg
+      when:
+        - ansible_os_family == "Debian"
+        - not dd_installed.stat.exists
+
+    - name: Add Datadog repo
       copy:
         dest: /etc/apt/sources.list.d/datadog.list
         content: |
@@ -155,7 +164,7 @@
         - not dd_installed.stat.exists
 
     #################################################
-    # ✅ RHEL / AMAZON LINUX
+    # ✅ RHEL
     #################################################
 
     - name: Add Datadog repo
@@ -181,13 +190,13 @@
     # ✅ CONFIGURATION
     #################################################
 
-    - name: Configure API key
+    - name: Set API key
       lineinfile:
         path: /etc/datadog-agent/datadog.yaml
         regexp: '^api_key:'
         line: "api_key: {{ datadog_api_key }}"
 
-    - name: Configure site
+    - name: Set site
       lineinfile:
         path: /etc/datadog-agent/datadog.yaml
         regexp: '^# site:'
@@ -203,6 +212,6 @@
         state: started
         enabled: yes
 
-    - name: Success message
+    - name: Success
       debug:
         msg: "✅ Datadog installed successfully on {{ inventory_hostname }}"

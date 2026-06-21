@@ -16,15 +16,15 @@
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=state=1"
         method: GET
-        user: "{{ sn_username }}"
-        password: "{{ sn_password }}"
+        user: "{{ snow_user }}"           # ✅ FIXED
+        password: "{{ snow_password }}"   # ✅ FIXED
         force_basic_auth: yes
         return_content: yes
         headers:
           Accept: "application/json"
       register: sn_response
 
-    # ✅ Debug full response (for troubleshooting)
+    # ✅ Debug response (optional – remove later)
     - name: Debug ServiceNow response
       debug:
         var: sn_response.json
@@ -34,26 +34,25 @@
       set_fact:
         target_host: "{{ sn_response.json.result[0].variables.target }}"
 
-    # ✅ Validate target
+    # ✅ Validate
     - name: Fail if target missing
       fail:
         msg: "Target hostname not found in ServiceNow request"
       when: target_host is not defined or target_host == ""
 
     # ✅ Show target
-    - name: Show target host
+    - name: Show target
       debug:
         msg: "Target = {{ target_host }}"
 
-    # ✅ Add host dynamically (NAME → resolved by AWS inventory)
+    # ✅ Add host dynamically
     - name: Add host dynamically
       add_host:
         name: "{{ target_host }}"
         groups: dynamic_targets
 
-
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG ON TARGET
+# ✅ PLAY 2: INSTALL DATADOG
 #################################################
 
 - name: Install Datadog Agent
@@ -67,12 +66,12 @@
   tasks:
 
     # ✅ Validate API key
-    - name: Check Datadog API key
+    - name: Check API key
       fail:
         msg: "Datadog API key missing"
       when: datadog_api_key is not defined or datadog_api_key == ""
 
-    # ✅ Check if already installed (idempotent)
+    # ✅ Check existing install
     - name: Check if Datadog installed
       stat:
         path: /etc/datadog-agent/datadog.yaml
@@ -89,14 +88,14 @@
         - ansible_os_family == "Debian"
         - not dd_installed.stat.exists
 
-    - name: Add Datadog APT repo
+    - name: Add Datadog repo
       apt_repository:
         repo: "deb https://apt.datadoghq.com/ stable 7"
       when:
         - ansible_os_family == "Debian"
         - not dd_installed.stat.exists
 
-    - name: Install Datadog agent (Debian)
+    - name: Install Datadog (Debian)
       apt:
         name: datadog-agent
         state: present
@@ -109,7 +108,7 @@
     # ✅ RHEL / AMAZON LINUX
     #################################################
 
-    - name: Add Datadog YUM repo
+    - name: Add Datadog yum repo
       yum_repository:
         name: datadog
         description: Datadog Repo
@@ -121,7 +120,7 @@
         - ansible_os_family == "RedHat"
         - not dd_installed.stat.exists
 
-    - name: Install Datadog agent (RHEL)
+    - name: Install Datadog (RHEL)
       yum:
         name: datadog-agent
         state: present
@@ -133,13 +132,13 @@
     # ✅ CONFIGURATION
     #################################################
 
-    - name: Configure Datadog API key
+    - name: Set API key
       lineinfile:
         path: /etc/datadog-agent/datadog.yaml
         regexp: '^api_key:'
         line: "api_key: {{ datadog_api_key }}"
 
-    - name: Configure Datadog site
+    - name: Set site
       lineinfile:
         path: /etc/datadog-agent/datadog.yaml
         regexp: '^# site:'
@@ -149,8 +148,9 @@
     # ✅ START SERVICE
     #################################################
 
-    - name: Ensure Datadog agent is running
+    - name: Ensure Datadog service running
       service:
         name: datadog-agent
         state: started
         enabled: yes
+

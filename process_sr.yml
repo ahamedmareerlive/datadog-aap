@@ -1,5 +1,5 @@
 #################################################
-# ✅ PLAY 1: SERVICENOW → GET TARGET HOSTNAME
+# ✅ PLAY 1: SERVICENOW → RESOLVE REAL HOSTNAME
 #################################################
 
 - name: Process ServiceNow SR
@@ -26,82 +26,90 @@
         return_content: yes
       register: sn_response
 
-    - name: DEBUG - SR Response
-      debug:
+    - debug:
         var: sn_response.json
 
     #################################################
-    # ✅ STEP 2: EXTRACT SYS_ID
+    # ✅ STEP 2: GET SYS_ID
     #################################################
 
-    - name: Extract sys_id
-      set_fact:
+    - set_fact:
         request_sys_id: "{{ sn_response.json.result[0].sys_id }}"
 
-    - name: DEBUG - sys_id
-      debug:
+    - debug:
         msg: "Request SYS_ID = {{ request_sys_id }}"
 
     #################################################
-    # ✅ STEP 3: GET VARIABLES (FIXED)
+    # ✅ STEP 3: GET MTOM RECORD
     #################################################
 
-    - name: Get variables (WITH display_value)
+    - name: Get mtom records
       uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request={{ request_sys_id }}&sysparm_display_value=true"
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request={{ request_sys_id }}"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
-        force_basic_auth: yes
         return_content: yes
-      register: var_response
+      register: mtom_response
 
-    - name: DEBUG - Variables Response
-      debug:
-        var: var_response.json
-
-    #################################################
-    # ✅ STEP 4: VALIDATE VARIABLES
-    #################################################
-
-    - name: Check variables exist
-      fail:
-        msg: "❌ No variables found in ServiceNow request"
-      when: var_response.json.result | length == 0
+    - debug:
+        var: mtom_response.json
 
     #################################################
-    # ✅ STEP 5: SHOW VARIABLES
+    # ✅ STEP 4: GET OPTION SYS_ID
     #################################################
 
-    - name: DEBUG - Show all variables
-      debug:
-        msg: "Variable display value = {{ item.sc_item_option.display_value }}"
-      loop: "{{ var_response.json.result }}"
+    - set_fact:
+        option_sys_id: "{{ mtom_response.json.result[0].sc_item_option.value }}"
+
+    - debug:
+        msg: "Option SYS_ID = {{ option_sys_id }}"
 
     #################################################
-    # ✅ STEP 6: EXTRACT HOSTNAME ✅ IMPORTANT
+    # ✅ STEP 5: GET ACTUAL VALUE ✅ FINAL FIX
     #################################################
 
-    - name: Extract target hostname
-      set_fact:
-        target_host: "{{ var_response.json.result[0].sc_item_option.display_value }}"
+    - name: Get actual variable value
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
+        method: GET
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        return_content: yes
+      register: option_response
 
-    - name: DEBUG - Final hostname
-      debug:
-        msg: "✅ TARGET HOSTNAME = {{ target_host }}"
+    - debug:
+        var: option_response.json
 
     #################################################
-    # ✅ STEP 7: ADD HOST
+    # ✅ STEP 6: EXTRACT REAL HOSTNAME ✅
     #################################################
 
-    - name: Add host dynamically
-      add_host:
+    - set_fact:
+        target_host: "{{ option_response.json.result.value }}"
+
+    - debug:
+        msg: "✅ FINAL HOSTNAME = {{ target_host }}"
+
+    #################################################
+    # ✅ STEP 7: VALIDATE
+    #################################################
+
+    - fail:
+        msg: "Hostname extraction failed"
+      when: target_host is not defined or target_host == ""
+
+    #################################################
+    # ✅ STEP 8: ADD HOST
+    #################################################
+
+    - add_host:
         name: "{{ target_host }}"
         groups: dynamic_targets
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG AGENT
+# ✅ PLAY 2: INSTALL DATADOG
 #################################################
 
 - name: Install Datadog Agent
@@ -114,63 +122,28 @@
 
   tasks:
 
-    #################################################
-    # ✅ STEP 1: VERIFY HOST
-    #################################################
-
-    - name: DEBUG - Connected host
-      debug:
+    - debug:
         msg: "Connected to {{ inventory_hostname }}"
 
-    #################################################
-    # ✅ STEP 2: OS INFO
-    #################################################
+    - debug:
+        msg: "OS = {{ ansible_os_family }}"
 
-    - name: DEBUG - OS Family
-      debug:
-        msg: "OS Family = {{ ansible_os_family }}"
-
-    #################################################
-    # ✅ STEP 3: CHECK API KEY
-    #################################################
-
-    - name: Validate Datadog API key
-      fail:
-        msg: "❌ Datadog API key missing"
+    - fail:
+        msg: "Datadog API key missing"
       when: datadog_api_key is not defined or datadog_api_key == ""
 
-    #################################################
-    # ✅ STEP 4: CHECK INSTALL
-    #################################################
-
-    - name: Check if Datadog installed
-      stat:
+    - stat:
         path: /etc/datadog-agent/datadog.yaml
       register: dd_installed
 
-    - name: DEBUG - Already installed
-      debug:
-        msg: "Installed = {{ dd_installed.stat.exists }}"
+    - debug:
+        msg: "Already installed = {{ dd_installed.stat.exists }}"
 
     #################################################
-    # ✅ DEBIAN INSTALL
+    # ✅ INSTALL
     #################################################
 
-    - name: Add APT key
-      apt_key:
-        url: https://keys.datadoghq.com/DATADOG_APT_KEY.public
-      when:
-        - ansible_os_family == "Debian"
-        - not dd_installed.stat.exists
-
-    - name: Add APT repo
-      apt_repository:
-        repo: "deb https://apt.datadoghq.com/ stable 7"
-      when:
-        - ansible_os_family == "Debian"
-        - not dd_installed.stat.exists
-
-    - name: Install Datadog (Debian)
+    - name: Install on Debian
       apt:
         name: datadog-agent
         state: present
@@ -179,22 +152,10 @@
         - ansible_os_family == "Debian"
         - not dd_installed.stat.exists
 
-    #################################################
-    # ✅ RHEL INSTALL
-    #################################################
-
-    - name: Add YUM repo
-      yum_repository:
-        name: datadog
-        baseurl: https://yum.datadoghq.com/stable/7/x86_64/
-        gpgkey: https://keys.datadoghq.com/DATADOG_RPM_KEY.public
-      when:
-        - ansible_os_family == "RedHat"
-        - not dd_installed.stat.exists
-
-    - name: Install Datadog (RHEL)
+    - name: Install on RHEL
       yum:
         name: datadog-agent
+        state: present
       when:
         - ansible_os_family == "RedHat"
         - not dd_installed.stat.exists
@@ -203,28 +164,19 @@
     # ✅ CONFIG
     #################################################
 
-    - name: Configure API key
-      lineinfile:
+    - lineinfile:
         path: /etc/datadog-agent/datadog.yaml
         regexp: '^api_key:'
         line: "api_key: {{ datadog_api_key }}"
-
-    - name: Configure site
-      lineinfile:
-        path: /etc/datadog-agent/datadog.yaml
-        regexp: '^# site:'
-        line: "site: {{ datadog_site }}"
 
     #################################################
     # ✅ SERVICE
     #################################################
 
-    - name: Start Datadog agent
-      service:
+    - service:
         name: datadog-agent
         state: started
         enabled: yes
 
-    - name: DEBUG - Final status
-      debug:
-        msg: "✅ Datadog agent installed and running"
+    - debug:
+        msg: "✅ Datadog installed successfully"

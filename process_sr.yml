@@ -64,7 +64,7 @@
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG AGENT
+# ✅ PLAY 2: INSTALL DATADOG (OFFICIAL METHOD ✅)
 #################################################
 
 - name: Install Datadog Agent
@@ -95,123 +95,37 @@
         path: /etc/datadog-agent/datadog.yaml
       register: dd_installed
 
+    - name: Debug install status
+      debug:
+        msg: "Already installed = {{ dd_installed.stat.exists }}"
+
     #################################################
-    # ✅ DEBIAN / UBUNTU (FINAL FIX ✅✅✅)
+    # ✅ INSTALL USING OFFICIAL SCRIPT ✅
     #################################################
 
-    - name: Install prerequisites
-      apt:
-        name:
-          - apt-transport-https
-          - ca-certificates
-          - curl
-          - gnupg
-        state: present
-        update_cache: yes
-      when:
-        - ansible_os_family == "Debian"
-        - not dd_installed.stat.exists
-
-    - name: Create keyring directory
-      file:
-        path: /usr/share/keyrings
-        state: directory
-        mode: '0755'
-      when:
-        - ansible_os_family == "Debian"
-        - not dd_installed.stat.exists
-
-    - name: Download Datadog GPG key (ASCII)
-      get_url:
-        url: https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public
-        dest: /tmp/datadog.asc
-        mode: '0644'
-      when:
-        - ansible_os_family == "Debian"
-        - not dd_installed.stat.exists
-
-    - name: Convert key to binary ✅ IMPORTANT
-      command: >
-        gpg --dearmor -o /usr/share/keyrings/datadog-archive-keyring.gpg /tmp/datadog.asc
+    - name: Install Datadog Agent (official script)
+      shell: >
+        DD_API_KEY={{ datadog_api_key }}
+        DD_SITE={{ datadog_site }}
+        bash -c "$(curl -L https://s3.amazonaws.com/dd-agent/scripts/install_script.sh)"
       args:
-        creates: /usr/share/keyrings/datadog-archive-keyring.gpg
-      when:
-        - ansible_os_family == "Debian"
-        - not dd_installed.stat.exists
-
-    - name: Add Datadog repo
-      copy:
-        dest: /etc/apt/sources.list.d/datadog.list
-        content: |
-          deb [signed-by=/usr/share/keyrings/datadog-archive-keyring.gpg] https://apt.datadoghq.com/ stable 7
-      when:
-        - ansible_os_family == "Debian"
-        - not dd_installed.stat.exists
-
-    - name: Update apt cache
-      apt:
-        update_cache: yes
-      when:
-        - ansible_os_family == "Debian"
-        - not dd_installed.stat.exists
-
-    - name: Install Datadog agent
-      apt:
-        name: datadog-agent
-        state: present
-      when:
-        - ansible_os_family == "Debian"
-        - not dd_installed.stat.exists
+        executable: /bin/bash
+      when: not dd_installed.stat.exists
 
     #################################################
-    # ✅ RHEL
+    # ✅ ENSURE SERVICE RUNNING
     #################################################
 
-    - name: Add Datadog repo
-      yum_repository:
-        name: datadog
-        description: Datadog Repo
-        baseurl: https://yum.datadoghq.com/stable/7/x86_64/
-        gpgcheck: yes
-        gpgkey: https://keys.datadoghq.com/DATADOG_RPM_KEY.public
-      when:
-        - ansible_os_family == "RedHat"
-        - not dd_installed.stat.exists
-
-    - name: Install Datadog agent (RHEL)
-      yum:
-        name: datadog-agent
-        state: present
-      when:
-        - ansible_os_family == "RedHat"
-        - not dd_installed.stat.exists
-
-    #################################################
-    # ✅ CONFIGURATION
-    #################################################
-
-    - name: Set API key
-      lineinfile:
-        path: /etc/datadog-agent/datadog.yaml
-        regexp: '^api_key:'
-        line: "api_key: {{ datadog_api_key }}"
-
-    - name: Set site
-      lineinfile:
-        path: /etc/datadog-agent/datadog.yaml
-        regexp: '^# site:'
-        line: "site: {{ datadog_site }}"
-
-    #################################################
-    # ✅ SERVICE
-    #################################################
-
-    - name: Start Datadog agent
+    - name: Ensure datadog-agent service is running
       service:
         name: datadog-agent
         state: started
         enabled: yes
 
-    - name: Success
+    #################################################
+    # ✅ SUCCESS MESSAGE
+    #################################################
+
+    - name: Final success
       debug:
         msg: "✅ Datadog installed successfully on {{ inventory_hostname }}"

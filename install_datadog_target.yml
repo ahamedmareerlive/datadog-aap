@@ -1,4 +1,4 @@
-- name: Install Datadog Agent (Cross Platform)
+- name: Install Datadog Agent (Debian & RHEL)
   hosts: dynamic_targets
   become: yes
   gather_facts: yes
@@ -8,18 +8,20 @@
 
   tasks:
 
-    - name: Validate API key
+    # ✅ Validate API key
+    - name: Check Datadog API key
       fail:
         msg: "Datadog API key missing"
       when: datadog_api_key is not defined or datadog_api_key == ""
 
-    - name: Check if already installed
+    # ✅ Check if already installed
+    - name: Check if Datadog already installed
       stat:
         path: /etc/datadog-agent/datadog.yaml
       register: dd_installed
 
     #################################################
-    # 🟢 Debian / Ubuntu
+    # 🟢 UBUNTU / DEBIAN
     #################################################
 
     - name: Add Datadog APT key
@@ -30,7 +32,7 @@
         - ansible_os_family == "Debian"
         - not dd_installed.stat.exists
 
-    - name: Add Datadog repo
+    - name: Add Datadog repository (Debian)
       apt_repository:
         repo: "deb https://apt.datadoghq.com/ stable 7"
         state: present
@@ -48,10 +50,10 @@
         - not dd_installed.stat.exists
 
     #################################################
-    # 🟠 RHEL / Amazon Linux
+    # 🔴 RHEL / AMAZON LINUX
     #################################################
 
-    - name: Add Datadog yum repo
+    - name: Add Datadog YUM repo
       yum_repository:
         name: datadog
         description: Datadog Repo
@@ -72,27 +74,28 @@
         - not dd_installed.stat.exists
 
     #################################################
-    # 🔧 CONFIG
+    # ⚙️ CONFIGURATION
     #################################################
 
-    - name: Set API key
+    - name: Set Datadog API key
       lineinfile:
         path: /etc/datadog-agent/datadog.yaml
         regexp: '^api_key:'
         line: "api_key: {{ datadog_api_key }}"
 
-    - name: Set site
+    - name: Set Datadog site
       lineinfile:
         path: /etc/datadog-agent/datadog.yaml
         regexp: '^# site:'
         line: "site: {{ datadog_site }}"
 
     #################################################
-    # 🚀 START SERVICE
+    # 🚀 SERVICE
     #################################################
 
-    - name: Ensure Datadog running
+    - name: Ensure Datadog agent is running
       service:
         name: datadog-agent
         state: started
         enabled: yes
+

@@ -1,41 +1,156 @@
+#################################################
+# ✅ PLAY 1: READ SERVICENOW REQUEST
+#################################################
+
 - name: Process ServiceNow SR
   hosts: localhost
   gather_facts: no
 
   vars:
-    servicenow_instance: "your_instance"
+    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
 
   tasks:
 
-    - name: Get SR details
+    # ✅ Get SR from ServiceNow
+    - name: Get ServiceNow Request Item
       uri:
-        url: "https://{{ servicenow_instance }}.service-now.com/api/now/table/sc_req_item?sysparm_query=state=1"
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=state=1"
         method: GET
         user: "{{ sn_username }}"
         password: "{{ sn_password }}"
         force_basic_auth: yes
         return_content: yes
+        headers:
+          Accept: "application/json"
       register: sn_response
 
-    - name: Extract description
-      set_fact:
-        description: "{{ sn_response.json.result[0].description | lower }}"
+    # ✅ Debug full response (for troubleshooting)
+    - name: Debug ServiceNow response
+      debug:
+        var: sn_response.json
 
-    - name: Extract target host (NAME)
+    # ✅ Extract hostname from catalog variable
+    - name: Extract target hostname
       set_fact:
-        target_host: "{{ description | regex_search('target:\\s*(\\S+)', '\\1') }}"
+        target_host: "{{ sn_response.json.result[0].variables.target }}"
 
-    - name: Validate target
+    # ✅ Validate target
+    - name: Fail if target missing
       fail:
-        msg: "Target not found in SR"
+        msg: "Target hostname not found in ServiceNow request"
       when: target_host is not defined or target_host == ""
 
-    # ✅ Add host dynamically by NAME
-    - name: Add dynamic host
+    # ✅ Show target
+    - name: Show target host
+      debug:
+        msg: "Target = {{ target_host }}"
+
+    # ✅ Add host dynamically (NAME → resolved by AWS inventory)
+    - name: Add host dynamically
       add_host:
         name: "{{ target_host }}"
         groups: dynamic_targets
 
-    # ✅ Call install
-    - name: Run install playbook
-      import_playbook: install_datadog_target.yml
+
+#################################################
+# ✅ PLAY 2: INSTALL DATADOG ON TARGET
+#################################################
+
+- name: Install Datadog Agent
+  hosts: dynamic_targets
+  become: yes
+  gather_facts: yes
+
+  vars:
+    datadog_site: "datadoghq.com"
+
+  tasks:
+
+    # ✅ Validate API key
+    - name: Check Datadog API key
+      fail:
+        msg: "Datadog API key missing"
+      when: datadog_api_key is not defined or datadog_api_key == ""
+
+    # ✅ Check if already installed (idempotent)
+    - name: Check if Datadog installed
+      stat:
+        path: /etc/datadog-agent/datadog.yaml
+      register: dd_installed
+
+    #################################################
+    # ✅ DEBIAN / UBUNTU
+    #################################################
+
+    - name: Add Datadog APT key
+      apt_key:
+        url: https://keys.datadoghq.com/DATADOG_APT_KEY.public
+      when:
+        - ansible_os_family == "Debian"
+        - not dd_installed.stat.exists
+
+    - name: Add Datadog APT repo
+      apt_repository:
+        repo: "deb https://apt.datadoghq.com/ stable 7"
+      when:
+        - ansible_os_family == "Debian"
+        - not dd_installed.stat.exists
+
+    - name: Install Datadog agent (Debian)
+      apt:
+        name: datadog-agent
+        state: present
+        update_cache: yes
+      when:
+        - ansible_os_family == "Debian"
+        - not dd_installed.stat.exists
+
+    #################################################
+    # ✅ RHEL / AMAZON LINUX
+    #################################################
+
+    - name: Add Datadog YUM repo
+      yum_repository:
+        name: datadog
+        description: Datadog Repo
+        baseurl: https://yum.datadoghq.com/stable/7/x86_64/
+        gpgcheck: yes
+        gpgkey: https://keys.datadoghq.com/DATADOG_RPM_KEY.public
+        enabled: yes
+      when:
+        - ansible_os_family == "RedHat"
+        - not dd_installed.stat.exists
+
+    - name: Install Datadog agent (RHEL)
+      yum:
+        name: datadog-agent
+        state: present
+      when:
+        - ansible_os_family == "RedHat"
+        - not dd_installed.stat.exists
+
+    #################################################
+    # ✅ CONFIGURATION
+    #################################################
+
+    - name: Configure Datadog API key
+      lineinfile:
+        path: /etc/datadog-agent/datadog.yaml
+        regexp: '^api_key:'
+        line: "api_key: {{ datadog_api_key }}"
+
+    - name: Configure Datadog site
+      lineinfile:
+        path: /etc/datadog-agent/datadog.yaml
+        regexp: '^# site:'
+        line: "site: {{ datadog_site }}"
+
+    #################################################
+    # ✅ START SERVICE
+    #################################################
+
+    - name: Ensure Datadog agent is running
+      service:
+        name: datadog-agent
+        state: started
+        enabled: yes

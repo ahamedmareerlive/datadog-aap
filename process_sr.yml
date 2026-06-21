@@ -1,5 +1,5 @@
 #################################################
-# ✅ PLAY 1: SERVICENOW → GET REAL HOSTNAME
+# ✅ PLAY 1: SERVICENOW → GET HOSTNAME
 #################################################
 
 - name: Process ServiceNow SR
@@ -26,9 +26,6 @@
         return_content: yes
       register: sn_response
 
-    - debug:
-        var: sn_response.json
-
     #################################################
     # ✅ GET SYS_ID
     #################################################
@@ -36,9 +33,6 @@
     - name: Extract sys_id
       set_fact:
         request_sys_id: "{{ sn_response.json.result[0].sys_id }}"
-
-    - debug:
-        msg: "Request SYS_ID = {{ request_sys_id }}"
 
     #################################################
     # ✅ GET MTOM
@@ -53,9 +47,6 @@
         return_content: yes
       register: mtom_response
 
-    - debug:
-        var: mtom_response.json
-
     #################################################
     # ✅ GET OPTION SYS_ID
     #################################################
@@ -64,11 +55,8 @@
       set_fact:
         option_sys_id: "{{ mtom_response.json.result[0].sc_item_option.value }}"
 
-    - debug:
-        msg: "Option SYS_ID = {{ option_sys_id }}"
-
     #################################################
-    # ✅ GET ACTUAL HOSTNAME
+    # ✅ GET REAL HOSTNAME
     #################################################
 
     - name: Get actual variable value
@@ -80,15 +68,9 @@
         return_content: yes
       register: option_response
 
-    - debug:
-        var: option_response.json
-
     - name: Set hostname
       set_fact:
         target_host: "{{ option_response.json.result.value }}"
-
-    - debug:
-        msg: "✅ FINAL HOSTNAME = {{ target_host }}"
 
     - name: Validate hostname
       fail:
@@ -120,17 +102,7 @@
   tasks:
 
     #################################################
-    # ✅ DEBUG CONNECTION
-    #################################################
-
-    - debug:
-        msg: "Connected to {{ inventory_hostname }}"
-
-    - debug:
-        msg: "OS = {{ ansible_os_family }}"
-
-    #################################################
-    # ✅ VALIDATE API KEY
+    # ✅ VALIDATOR
     #################################################
 
     - name: Validate Datadog API key
@@ -139,19 +111,16 @@
       when: datadog_api_key is not defined or datadog_api_key == ""
 
     #################################################
-    # ✅ CHECK INSTALL
+    # ✅ CHECK EXISTING INSTALL
     #################################################
 
-    - name: Check if installed
+    - name: Check if Datadog installed
       stat:
         path: /etc/datadog-agent/datadog.yaml
       register: dd_installed
 
-    - debug:
-        msg: "Already installed = {{ dd_installed.stat.exists }}"
-
     #################################################
-    # ✅ DEBIAN (MODERN METHOD ✅ FIXED)
+    # ✅ DEBIAN / UBUNTU (MODERN FIX ✅)
     #################################################
 
     - name: Install prerequisites
@@ -167,7 +136,7 @@
         - ansible_os_family == "Debian"
         - not dd_installed.stat.exists
 
-    - name: Create keyrings dir
+    - name: Create keyrings directory
       file:
         path: /etc/apt/keyrings
         state: directory
@@ -176,16 +145,16 @@
         - ansible_os_family == "Debian"
         - not dd_installed.stat.exists
 
-    - name: Download Datadog GPG key
+    - name: Download Datadog GPG key ✅ FIXED URL
       get_url:
-        url: https://keys.datadoghq.com/DATADOG_APT_KEY.public
+        url: "https://keys.datadoghq.com/DATADOG_APT_KEY.public"
         dest: /etc/apt/keyrings/datadog.asc
         mode: '0644'
       when:
         - ansible_os_family == "Debian"
         - not dd_installed.stat.exists
 
-    - name: Add Datadog repo
+    - name: Add Datadog repository
       copy:
         dest: /etc/apt/sources.list.d/datadog.list
         content: |
@@ -213,9 +182,10 @@
     # ✅ RHEL
     #################################################
 
-    - name: Add Datadog repo
+    - name: Add Datadog YUM repo
       yum_repository:
         name: datadog
+        description: Datadog Repo
         baseurl: https://yum.datadoghq.com/stable/7/x86_64/
         gpgcheck: yes
         gpgkey: https://keys.datadoghq.com/DATADOG_RPM_KEY.public
@@ -232,7 +202,7 @@
         - not dd_installed.stat.exists
 
     #################################################
-    # ✅ CONFIG
+    # ✅ CONFIGURATION
     #################################################
 
     - name: Configure API key
@@ -257,5 +227,7 @@
         state: started
         enabled: yes
 
-    - debug:
+    - name: Success message
+      debug:
         msg: "✅ Datadog installed successfully on {{ inventory_hostname }}"
+

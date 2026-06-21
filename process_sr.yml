@@ -1,11 +1,10 @@
 #################################################
-# ✅ PLAY 1: GET SR + SET IN PROGRESS
+# ✅ PLAY 1: GET SR + UPDATE START
 #################################################
 
 - name: Get SR and prepare execution
   hosts: localhost
   gather_facts: no
-  become: no
 
   vars:
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
@@ -27,21 +26,17 @@
         return_content: yes
       register: sn
 
-    - name: Validate SR exists
+    - name: Fail if no SR
       fail:
-        msg: "❌ No matching SR found"
+        msg: "❌ No SR found"
       when: sn.json.result | length == 0
 
-    - name: Extract IDs
-      set_fact:
+    - set_fact:
         request_item_sys_id: "{{ sn.json.result[0].sys_id }}"
         request_sys_id: "{{ sn.json.result[0].request.value }}"
 
-    - debug:
-        msg: "✅ Selected Ticket = {{ sn.json.result[0].number }}"
-
     #################################################
-    # ✅ SET RITM → IN PROGRESS
+    # ✅ MARK IN PROGRESS
     #################################################
 
     - name: Set RITM to In Progress
@@ -53,9 +48,10 @@
         body_format: json
         body:
           state: "2"
+          work_notes: "🚀 Automation started from AAP"
 
     #################################################
-    # ✅ GET VARIABLES
+    # ✅ GET HOSTNAME
     #################################################
 
     - name: Get variables
@@ -66,15 +62,13 @@
         password: "{{ snow_password }}"
       register: mtom
 
-    - name: Sort variables
-      set_fact:
+    - set_fact:
         sorted_mtom: "{{ mtom.json.result | sort(attribute='sys_created_on') }}"
 
-    - name: Get latest option id
-      set_fact:
+    - set_fact:
         option_sys_id: "{{ sorted_mtom[-1].sc_item_option.value }}"
 
-    - name: Get hostname
+    - name: Get hostname value
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
         method: GET
@@ -82,19 +76,13 @@
         password: "{{ snow_password }}"
       register: opt
 
-    - name: Set target host
-      set_fact:
+    - set_fact:
         target_host: "{{ opt.json.result.value }}"
 
     - debug:
         msg: "✅ TARGET HOST = {{ target_host }}"
 
-    - name: Validate host
-      fail:
-        msg: "❌ Invalid host {{ target_host }}"
-      when: target_host not in groups['all']
-
-    - name: Add dynamic host
+    - name: Add host dynamically
       add_host:
         name: "{{ target_host }}"
         groups: dynamic_targets
@@ -102,113 +90,63 @@
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG (FIXED ✅)
+# ✅ PLAY 2: INSTALL DATADOG (FRESH ✅)
 #################################################
 
 - name: Install Datadog
   hosts: dynamic_targets
-  gather_facts: yes
   become: yes
+  gather_facts: yes
 
   tasks:
 
-    - debug:
-        msg: "🚀 Running on {{ inventory_hostname }}"
+    #################################################
+    # ✅ INSTALL (CLEAN STYLE)
+    #################################################
 
     - block:
 
-        #################################################
-        # ✅ FIX PACKAGE ISSUES
-        #################################################
-
-        - name: Fix dpkg issues
-          shell: |
-            rm -f /var/lib/dpkg/lock-frontend
-            rm -f /var/lib/dpkg/lock
-            dpkg --configure -a
-
-        - name: Clean apt cache
-          shell: |
-            rm -rf /var/lib/apt/lists/*
-            apt-get clean
-
-        - name: Update apt cache
-          apt:
-            update_cache: yes
-
-        #################################################
-        # ✅ REMOVE OLD DATADOG CONFIG
-        #################################################
-
-        - name: Remove Datadog repo
-          file:
-            path: /etc/apt/sources.list.d/datadog.list
-            state: absent
-
-        - name: Remove Datadog key
-          file:
-            path: /usr/share/keyrings/datadog-archive-keyring.gpg
-            state: absent
-
-        #################################################
-        # ✅ DOWNLOAD SCRIPT
-        #################################################
-
-        - name: Download installer
+        - name: Download Datadog script
           get_url:
             url: https://install.datadoghq.com/scripts/install_script_agent7.sh
             dest: /tmp/datadog_install.sh
             mode: '0755'
 
-        #################################################
-        # ✅ INSTALL
-        #################################################
-
-        - name: Install Datadog Agent
+        - name: Run Datadog installer
           shell: |
-            set -x
             DD_API_KEY={{ datadog_api_key }} \
             DD_SITE="us5.datadoghq.com" \
             DD_AGENT_MAJOR_VERSION=7 \
             bash /tmp/datadog_install.sh
-          register: install_output
-          args:
-            executable: /bin/bash
+          register: dd_install
 
-        - debug:
-            var: install_output.stdout_lines
+        - name: Show output
+          debug:
+            var: dd_install.stdout_lines
 
-        #################################################
-        # ✅ START SERVICE
-        #################################################
-
-        - name: Ensure Datadog running
+        - name: Ensure service running
           service:
             name: datadog-agent
             state: started
             enabled: yes
 
-        - name: Mark success
-          set_fact:
+        - set_fact:
             install_success: true
 
       rescue:
 
-        - debug:
-            msg: "❌ Datadog installation failed"
-
-        - set_fact:
+        - name: Mark failure
+          set_fact:
             install_success: false
 
 
 #################################################
-# ✅ PLAY 3: UPDATE SERVICENOW
+# ✅ PLAY 3: UPDATE SERVICENOW (FINAL)
 #################################################
 
 - name: Update ServiceNow
   hosts: localhost
   gather_facts: no
-  become: no
 
   vars:
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"

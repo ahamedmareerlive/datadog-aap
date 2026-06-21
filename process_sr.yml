@@ -49,6 +49,7 @@
         method: PATCH
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
+        force_basic_auth: yes
         body_format: json
         body:
           state: "2"
@@ -64,6 +65,7 @@
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
+        force_basic_auth: yes
       register: mtom
 
     - name: Sort variables
@@ -80,6 +82,7 @@
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
+        force_basic_auth: yes
       register: opt
 
     - name: Set target host
@@ -98,7 +101,7 @@
       add_host:
         name: "{{ target_host }}"
         groups: dynamic_targets
-        ansible_host: "{{ hostvars[target_host].ansible_host }}"
+        ansible_host: "{{ hostvars[target_host].ansible_host | default(target_host) }}"
 
 
 #################################################
@@ -132,12 +135,19 @@
             update_cache: yes
 
         #################################################
-        # ✅ ADD DATADOG KEY
+        # ✅ ADD DATADOG KEY (DEARMOR METHOD)
         #################################################
 
-        - name: Add Datadog GPG key
-          shell: |
-            curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public | gpg --dearmor -o /usr/share/keyrings/datadog-archive-keyring.gpg
+        # Note: DATADOG_APT_KEY_C0962C7D.public is the primary modern repo signing key
+        - name: Download Datadog GPG key
+          get_url:
+            url: https://datadoghq.com
+            dest: /tmp/datadog_key.public
+            mode: '0644'
+
+        - name: Dearmor Datadog GPG key to keyring
+          command: gpg --yes --dearmor -o /usr/share/keyrings/datadog-archive-keyring.gpg /tmp/datadog_key.public
+          changed_when: true
 
         #################################################
         # ✅ ADD REPO
@@ -148,6 +158,7 @@
             dest: /etc/apt/sources.list.d/datadog.list
             content: |
               deb [signed-by=/usr/share/keyrings/datadog-archive-keyring.gpg] https://apt.datadoghq.com/ stable 7
+            mode: '0644'
 
         #################################################
         # ✅ UPDATE CACHE
@@ -192,13 +203,13 @@
             state: started
             enabled: yes
 
-        - name: Mark success
+        - name: Mark success on host
           set_fact:
             install_success: true
 
       rescue:
 
-        - name: Mark failure
+        - name: Mark failure on host
           set_fact:
             install_success: false
 
@@ -213,48 +224,59 @@
 
   vars:
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
+    # Safely extract execution results across play bounds
+    execution_host: "{{ groups['dynamic_targets'][0] | default('') }}"
+    was_successful: "{{ hostvars[execution_host]['install_success'] | default(false) if execution_host else false }}"
 
   tasks:
+
+    - name: Fail early if no dynamic target was parsed
+      fail:
+        msg: "❌ Playbook aborted: target host definition missing"
+      when: execution_host == ""
 
     #################################################
     # ✅ SUCCESS CASE
     #################################################
 
-    - name: Close RITM
+    - name: Close RITM (Success)
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
         method: PATCH
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
+        force_basic_auth: yes
         body_format: json
         body:
           state: "3"
           work_notes: "✅ Datadog installed successfully via AAP"
-      when: hostvars['dynamic_targets'][0].install_success | default(false)
+      when: was_successful
 
-    - name: Close REQUEST
+    - name: Close REQUEST (Success)
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_request/{{ request_sys_id }}"
         method: PATCH
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
+        force_basic_auth: yes
         body_format: json
         body:
           state: "3"
-      when: hostvars['dynamic_targets'][0].install_success | default(false)
+      when: was_successful
 
     #################################################
     # ❌ FAILURE CASE
     #################################################
 
-    - name: Set RITM to Pending
+    - name: Set RITM to Pending (Failure)
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
         method: PATCH
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
+        force_basic_auth: yes
         body_format: json
         body:
           state: "-5"
           work_notes: "❌ Datadog installation failed via AAP"
-      when: not (hostvars['dynamic_targets'][0].install_success | default(false))
+      when: not was_successful

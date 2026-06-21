@@ -1,5 +1,5 @@
 #################################################
-# ✅ PLAY 1: SERVICENOW → GET HOSTNAME
+# ✅ PLAY 1: SERVICENOW → GET REAL HOSTNAME
 #################################################
 
 - name: Process ServiceNow SR
@@ -13,7 +13,7 @@
   tasks:
 
     #################################################
-    # ✅ STEP 1: GET SR
+    # ✅ GET SR
     #################################################
 
     - name: Get ServiceNow Request Item
@@ -26,12 +26,11 @@
         return_content: yes
       register: sn_response
 
-    - name: DEBUG - SR response
-      debug:
+    - debug:
         var: sn_response.json
 
     #################################################
-    # ✅ STEP 2: GET SYS_ID
+    # ✅ GET SYS_ID
     #################################################
 
     - name: Extract sys_id
@@ -42,7 +41,7 @@
         msg: "Request SYS_ID = {{ request_sys_id }}"
 
     #################################################
-    # ✅ STEP 3: GET MTOM DATA
+    # ✅ GET MTOM
     #################################################
 
     - name: Get mtom records
@@ -58,7 +57,7 @@
         var: mtom_response.json
 
     #################################################
-    # ✅ STEP 4: GET OPTION SYS_ID
+    # ✅ GET OPTION SYS_ID
     #################################################
 
     - name: Extract option sys_id
@@ -69,7 +68,7 @@
         msg: "Option SYS_ID = {{ option_sys_id }}"
 
     #################################################
-    # ✅ STEP 5: GET REAL VALUE ✅
+    # ✅ GET ACTUAL HOSTNAME
     #################################################
 
     - name: Get actual variable value
@@ -84,24 +83,20 @@
     - debug:
         var: option_response.json
 
-    #################################################
-    # ✅ STEP 6: EXTRACT HOSTNAME ✅
-    #################################################
-
-    - name: Set target hostname
+    - name: Set hostname
       set_fact:
         target_host: "{{ option_response.json.result.value }}"
 
     - debug:
         msg: "✅ FINAL HOSTNAME = {{ target_host }}"
 
-    - name: Fail if empty
+    - name: Validate hostname
       fail:
         msg: "Hostname extraction failed"
       when: target_host is not defined or target_host == ""
 
     #################################################
-    # ✅ STEP 7: ADD HOST
+    # ✅ ADD HOST
     #################################################
 
     - name: Add host dynamically
@@ -128,12 +123,10 @@
     # ✅ DEBUG CONNECTION
     #################################################
 
-    - name: Connected host
-      debug:
+    - debug:
         msg: "Connected to {{ inventory_hostname }}"
 
-    - name: OS Info
-      debug:
+    - debug:
         msg: "OS = {{ ansible_os_family }}"
 
     #################################################
@@ -158,7 +151,7 @@
         msg: "Already installed = {{ dd_installed.stat.exists }}"
 
     #################################################
-    # ✅ DEBIAN INSTALL
+    # ✅ DEBIAN (MODERN METHOD ✅ FIXED)
     #################################################
 
     - name: Install prerequisites
@@ -166,6 +159,7 @@
         name:
           - apt-transport-https
           - ca-certificates
+          - curl
           - gnupg
         state: present
         update_cache: yes
@@ -173,18 +167,29 @@
         - ansible_os_family == "Debian"
         - not dd_installed.stat.exists
 
-    - name: Add Datadog APT key
-      apt_key:
-        url: https://keys.datadoghq.com/DATADOG_APT_KEY.public
-        state: present
+    - name: Create keyrings dir
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
       when:
         - ansible_os_family == "Debian"
         - not dd_installed.stat.exists
 
-    - name: Add Datadog repository
-      apt_repository:
-        repo: "deb https://apt.datadoghq.com/ stable 7"
-        state: present
+    - name: Download Datadog GPG key
+      get_url:
+        url: https://keys.datadoghq.com/DATADOG_APT_KEY.public
+        dest: /etc/apt/keyrings/datadog.asc
+        mode: '0644'
+      when:
+        - ansible_os_family == "Debian"
+        - not dd_installed.stat.exists
+
+    - name: Add Datadog repo
+      copy:
+        dest: /etc/apt/sources.list.d/datadog.list
+        content: |
+          deb [signed-by=/etc/apt/keyrings/datadog.asc] https://apt.datadoghq.com/ stable 7
       when:
         - ansible_os_family == "Debian"
         - not dd_installed.stat.exists
@@ -205,13 +210,12 @@
         - not dd_installed.stat.exists
 
     #################################################
-    # ✅ RHEL INSTALL
+    # ✅ RHEL
     #################################################
 
-    - name: Add Datadog YUM repo
+    - name: Add Datadog repo
       yum_repository:
         name: datadog
-        description: Datadog Repo
         baseurl: https://yum.datadoghq.com/stable/7/x86_64/
         gpgcheck: yes
         gpgkey: https://keys.datadoghq.com/DATADOG_RPM_KEY.public
@@ -228,7 +232,7 @@
         - not dd_installed.stat.exists
 
     #################################################
-    # ✅ CONFIGURATION
+    # ✅ CONFIG
     #################################################
 
     - name: Configure API key
@@ -244,7 +248,7 @@
         line: "site: {{ datadog_site }}"
 
     #################################################
-    # ✅ START SERVICE
+    # ✅ SERVICE
     #################################################
 
     - name: Start Datadog agent
@@ -253,6 +257,5 @@
         state: started
         enabled: yes
 
-    - name: Final status
-      debug:
+    - debug:
         msg: "✅ Datadog installed successfully on {{ inventory_hostname }}"

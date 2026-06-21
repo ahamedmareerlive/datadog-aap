@@ -1,62 +1,63 @@
+---
 #################################################
-# ✅ PLAY 1: SERVICENOW → FILTER + LATEST SR
+# ✅ PLAY 1: GET SR + SET IN PROGRESS
 #################################################
 
-- name: Process ServiceNow SR
+- name: Get SR and prepare execution
   hosts: localhost
   gather_facts: no
 
   vars:
-    ansible_become: false
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
-
-    # ✅ CHANGE THIS BASED ON YOUR USE CASE
     search_text: "Datadog"
 
   tasks:
 
-    #################################################
-    # ✅ GET LATEST SR WITH SAME DESCRIPTION
-    #################################################
-
-    - name: Get latest SR by description
+    - name: Get latest SR
       uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=short_descriptionLIKE{{ search_text }}^ORDERBYDESCsys_created_on&sysparm_limit=1"
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=short_descriptionLIKE{{ search_text }}^active=true^stateIN1,2&sysparm_order_by_desc=sys_created_on&sysparm_limit=1"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
         force_basic_auth: yes
-        return_content: yes
       register: sn
 
-    #################################################
-    # ✅ DEBUG SR
-    #################################################
+    - name: Validate SR exists
+      fail:
+        msg: "❌ No ServiceNow SR found"
+      when: sn.json.result | length == 0
 
-    - name: Show selected SR
-      debug:
-        msg: "SR: {{ sn.json.result[0].number }} | Desc: {{ sn.json.result[0].short_description }}"
-
-    - name: Extract sys_id
+    - name: Extract IDs
       set_fact:
-        request_sys_id: "{{ sn.json.result[0].sys_id }}"
+        request_item_sys_id: "{{ sn.json.result[0].sys_id }}"
+        request_sys_id: "{{ sn.json.result[0].request.value }}"
 
-    #################################################
-    # ✅ GET VARIABLES (HOSTNAME)
-    #################################################
-
-    - name: Get mtom records
+    - name: Set RITM to In Progress
       uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request={{ request_sys_id }}"
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        body_format: json
+        body:
+          state: "2"
+          work_notes: "🚀 Datadog installation started via AAP"
+
+    #################################################
+    # ✅ GET TARGET HOST
+    #################################################
+
+    - name: Get variables
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request={{ request_item_sys_id }}"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
-        return_content: yes
       register: mtom
 
-    - name: Extract option sys_id
+    - name: Extract latest variable
       set_fact:
-        option_sys_id: "{{ mtom.json.result[0].sc_item_option.value }}"
+        option_sys_id: "{{ (mtom.json.result | sort(attribute='sys_created_on'))[-1].sc_item_option.value }}"
 
     - name: Get hostname value
       uri:
@@ -64,118 +65,109 @@
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
-        return_content: yes
       register: opt
 
     - name: Set target host
       set_fact:
         target_host: "{{ opt.json.result.value }}"
 
-    - name: Validate hostname
-      fail:
-        msg: "❌ No hostname found in SR"
-      when: target_host is not defined or target_host == ""
-
-    - name: Add dynamic target
+    - name: Add dynamic host
       add_host:
         name: "{{ target_host }}"
         groups: dynamic_targets
+        ansible_host: "{{ hostvars[target_host].ansible_host }}"
 
 
 #################################################
-# ✅ PLAY 2: MULTI‑OS DATADOG INSTALL
+# ✅ PLAY 2: INSTALL DATADOG (FINAL STABLE ✅)
 #################################################
 
 - name: Install Datadog Agent
   hosts: dynamic_targets
-  gather_facts: yes
   become: yes
-  become_method: sudo
+  gather_facts: yes
 
   tasks:
 
-    #################################################
-    # ✅ SHOW OS TYPE
-    #################################################
-
-    - name: Show OS
+    - name: Debug target
       debug:
-        msg: "OS Family = {{ ansible_os_family }}"
+        msg: "🚀 Installing Datadog on {{ inventory_hostname }}"
 
     #################################################
-    # ✅ CHECK INSTALL
+    # ✅ CHECK IF ALREADY INSTALLED (IDEMPOTENT)
     #################################################
 
-    - name: Check Datadog installation
+    - name: Check Datadog installed
       stat:
         path: /etc/datadog-agent/datadog.yaml
-      register: dd
-
-    - name: Show install status
-      debug:
-        msg: "Installed = {{ dd.stat.exists }}"
+      register: dd_installed
 
     #################################################
-    # ✅ CLEAN OLD CONFIG (MULTI‑OS SAFE)
+    # ✅ INSTALL ONLY IF NOT INSTALLED
     #################################################
 
-    - name: Remove Debian keyring
-      file:
-        path: /usr/share/keyrings/datadog-archive-keyring.gpg
-        state: absent
-      when:
-        - ansible_os_family == "Debian"
-        - not dd.stat.exists
+    - block:
 
-    - name: Remove Debian repo
-      file:
-        path: /etc/apt/sources.list.d/datadog.list
-        state: absent
-      when:
-        - ansible_os_family == "Debian"
-        - not dd.stat.exists
+        - name: Remove old Datadog key (clean state)
+          file:
+            path: /usr/share/keyrings/datadog-archive-keyring.gpg
+            state: absent
 
-    - name: Remove RHEL repo
-      file:
-        path: /etc/yum.repos.d/datadog.repo
-        state: absent
-      when:
-        - ansible_os_family == "RedHat"
-        - not dd.stat.exists
+        - name: Clean apt cache
+          shell: |
+            rm -rf /var/lib/apt/lists/*
+            apt-get clean
 
-    #################################################
-    # ✅ DOWNLOAD SCRIPT
-    #################################################
+        - name: Update apt cache
+          apt:
+            update_cache: yes
 
-    - name: Download Datadog installer
-      get_url:
-        url: https://install.datadoghq.com/scripts/install_script_agent7.sh
-        dest: /tmp/datadog_install.sh
-        mode: '0755'
-        force: yes
-      when: not dd.stat.exists
+        - name: Install dependencies
+          apt:
+            name:
+              - curl
+              - apt-transport-https
+            state: present
 
-    #################################################
-    # ✅ INSTALL DATADOG
-    #################################################
+        - name: Download Datadog key (stable ✅)
+          get_url:
+            url: https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.gpg
+            dest: /usr/share/keyrings/datadog-archive-keyring.gpg
+            mode: '0644'
+            force: yes
 
-    - name: Install Datadog Agent
-      shell: |
-        DD_API_KEY={{ datadog_api_key }} \
-        DD_SITE="us5.datadoghq.com" \
-        DD_AGENT_MAJOR_VERSION=7 \
-        DD_APM_INSTRUMENTATION_ENABLED=host \
-        DD_DATA_STREAMS_ENABLED=true \
-        DD_PROFILING_ENABLED=auto \
-        DD_LOGS_CONFIG_PROCESS_COLLECT_ALL=true \
-        bash /tmp/datadog_install.sh
-      args:
-        executable: /bin/bash
-      when: not dd.stat.exists
+        - name: Add Datadog repository
+          copy:
+            dest: /etc/apt/sources.list.d/datadog.list
+            content: |
+              deb [signed-by=/usr/share/keyrings/datadog-archive-keyring.gpg] https://apt.datadoghq.com/ stable 7
+
+        - name: Update apt after repo
+          apt:
+            update_cache: yes
+
+        - name: Install Datadog agent
+          apt:
+            name: datadog-agent
+            state: present
+
+      when: not dd_installed.stat.exists
 
     #################################################
-    # ✅ ENSURE SERVICE
+    # ✅ CONFIGURE + START (ALWAYS)
     #################################################
+
+    - name: Configure API key
+      lineinfile:
+        path: /etc/datadog-agent/datadog.yaml
+        regexp: "^api_key:"
+        line: "api_key: {{ datadog_api_key }}"
+
+    - name: Configure site
+      lineinfile:
+        path: /etc/datadog-agent/datadog.yaml
+        regexp: "^site:"
+        line: "site: us5.datadoghq.com"
 
     - name: Ensure Datadog running
       service:
@@ -183,22 +175,43 @@
         state: started
         enabled: yes
 
-    #################################################
-    # ✅ VERIFY STATUS
-    #################################################
+    - name: Mark success
+      set_fact:
+        install_success: true
 
-    - name: Check service status
-      shell: systemctl is-active datadog-agent
-      register: dd_status
 
-    - name: Show service state
-      debug:
-        msg: "Datadog service = {{ dd_status.stdout }}"
+#################################################
+# ✅ PLAY 3: UPDATE SERVICENOW
+#################################################
 
-    #################################################
-    # ✅ SUCCESS
-    #################################################
+- name: Update ServiceNow
+  hosts: localhost
+  gather_facts: no
 
-    - name: Final success
-      debug:
-        msg: "✅ Datadog installed on {{ inventory_hostname }}"
+  vars:
+    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
+
+  tasks:
+
+    - name: Close RITM (SUCCESS)
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        body_format: json
+        body:
+          state: "3"
+          work_notes: "✅ Datadog installed successfully via AAP"
+      when: hostvars['dynamic_targets'][0].install_success | default(true)
+
+    - name: Close REQUEST
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_request/{{ request_sys_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        body_format: json
+        body:
+          state: "3"
+      when: hostvars['dynamic_targets'][0].install_success | default(true)

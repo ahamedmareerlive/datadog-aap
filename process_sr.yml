@@ -41,7 +41,7 @@
         body_format: json
         body:
           state: "2"
-          work_notes: "🚀 Datadog installation started from AAP"
+          work_notes: "🚀 Datadog installation started"
 
     #################################################
     # ✅ GET TARGET HOST
@@ -55,15 +55,11 @@
         password: "{{ snow_password }}"
       register: mtom
 
-    - name: Sort variables
+    - name: Extract latest variable
       set_fact:
-        sorted_mtom: "{{ mtom.json.result | sort(attribute='sys_created_on') }}"
+        option_sys_id: "{{ (mtom.json.result | sort(attribute='sys_created_on'))[-1].sc_item_option.value }}"
 
-    - name: Extract option sys_id
-      set_fact:
-        option_sys_id: "{{ sorted_mtom[-1].sc_item_option.value }}"
-
-    - name: Get hostname value
+    - name: Get hostname
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
         method: GET
@@ -75,7 +71,7 @@
       set_fact:
         target_host: "{{ opt.json.result.value }}"
 
-    - name: Add host dynamically
+    - name: Add dynamic target
       add_host:
         name: "{{ target_host }}"
         groups: dynamic_targets
@@ -83,7 +79,7 @@
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG (STABLE ✅)
+# ✅ PLAY 2: INSTALL DATADOG (FINAL STABLE ✅)
 #################################################
 
 - name: Install Datadog Agent
@@ -93,37 +89,56 @@
 
   tasks:
 
-    - name: Debug target
+    - name: Confirm target
       debug:
-        msg: "🚀 Installing Datadog on {{ inventory_hostname }}"
+        msg: "🚀 Installing on {{ inventory_hostname }}"
 
     - block:
 
         #################################################
-        # ✅ INSTALL DEPENDENCIES
+        # ✅ CLEAN APT (FIX RANDOM FAILS)
         #################################################
 
-        - name: Install required packages
+        - name: Clean apt cache
+          shell: |
+            rm -rf /var/lib/apt/lists/*
+            apt-get clean
+
+        #################################################
+        # ✅ UPDATE APT (RETRY SAFE)
+        #################################################
+
+        - name: Update apt cache
+          apt:
+            update_cache: yes
+          register: apt_update
+          retries: 3
+          delay: 5
+          until: apt_update is succeeded
+
+        #################################################
+        # ✅ INSTALL BASIC PACKAGES
+        #################################################
+
+        - name: Install dependencies
           apt:
             name:
               - curl
               - apt-transport-https
-              - gnupg
             state: present
-            update_cache: yes
 
         #################################################
-        # ✅ DOWNLOAD KEY (NO GPG HANG ✅)
+        # ✅ ADD KEY (NO GPG HANG ✅)
         #################################################
 
-        - name: Download Datadog GPG key
+        - name: Download Datadog key
           get_url:
             url: https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.gpg
             dest: /usr/share/keyrings/datadog-archive-keyring.gpg
             mode: '0644'
 
         #################################################
-        # ✅ ADD REPOSITORY
+        # ✅ ADD REPO
         #################################################
 
         - name: Configure Datadog repo
@@ -133,21 +148,25 @@
               deb [signed-by=/usr/share/keyrings/datadog-archive-keyring.gpg] https://apt.datadoghq.com/ stable 7
 
         #################################################
-        # ✅ UPDATE APT
+        # ✅ UPDATE AGAIN
         #################################################
 
-        - name: Update apt cache
+        - name: Refresh apt cache
           apt:
             update_cache: yes
 
         #################################################
-        # ✅ INSTALL DATADOG
+        # ✅ INSTALL DATADOG (RETRY SAFE ✅)
         #################################################
 
         - name: Install datadog-agent
           apt:
             name: datadog-agent
             state: present
+          register: install_dd
+          retries: 3
+          delay: 5
+          until: install_dd is succeeded
 
         #################################################
         # ✅ CONFIGURE AGENT
@@ -169,7 +188,7 @@
         # ✅ START SERVICE
         #################################################
 
-        - name: Start Datadog agent
+        - name: Start Datadog service
           service:
             name: datadog-agent
             state: started
@@ -215,7 +234,7 @@
           work_notes: "✅ Datadog installed successfully via AAP"
       when: hostvars['dynamic_targets'][0].install_success | default(false)
 
-    - name: Close Request
+    - name: Close REQUEST
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_request/{{ request_sys_id }}"
         method: PATCH

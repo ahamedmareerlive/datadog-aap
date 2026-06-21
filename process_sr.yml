@@ -1,5 +1,5 @@
 #################################################
-# ✅ PLAY 1: GET LATEST OPEN SR (ZERO TOUCH ✅)
+# ✅ PLAY 1: GET LATEST VALID SR (ZERO TOUCH ✅)
 #################################################
 
 - name: Get latest ServiceNow SR
@@ -14,12 +14,12 @@
   tasks:
 
     #################################################
-    # ✅ GET LATEST OPEN SR (NO SPACE URL ✅)
+    # ✅ FETCH MULTIPLE SRs (NOT JUST 1)
     #################################################
 
-    - name: Get latest SR
+    - name: Get latest SR candidates
       uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=short_descriptionLIKE{{ search_text }}^active=true^state=1&sysparm_order_by_desc=sys_created_on&sysparm_limit=1"
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=short_descriptionLIKE{{ search_text }}^active=true^state=1&sysparm_order_by_desc=sys_created_on&sysparm_limit=5"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
@@ -28,30 +28,41 @@
       register: sn
 
     #################################################
-    # ✅ SHOW WHICH TICKET IS PICKED
+    # ✅ DEBUG ALL SRs
     #################################################
+
+    - name: Show SR list
+      debug:
+        var: sn.json.result
+
+    #################################################
+    # ✅ PICK REAL LATEST SR (SAFE ✅)
+    #################################################
+
+    - name: Select latest SR
+      set_fact:
+        selected_sr: "{{ sn.json.result | first }}"
 
     - name: Show selected SR
       debug:
         msg: >
-          ✅ Ticket={{ sn.json.result[0].number }}
-          | Created={{ sn.json.result[0].sys_created_on }}
-          | State={{ sn.json.result[0].state }}
-          | Desc={{ sn.json.result[0].short_description }}
+          ✅ Selected Ticket = {{ selected_sr.number }}
+          | Created = {{ selected_sr.sys_created_on }}
+          | Desc = {{ selected_sr.short_description }}
 
     #################################################
     # ✅ EXTRACT SYS_ID
     #################################################
 
-    - name: Extract sys_id
+    - name: Set sys_id
       set_fact:
-        request_sys_id: "{{ sn.json.result[0].sys_id }}"
+        request_sys_id: "{{ selected_sr.sys_id }}"
 
     #################################################
     # ✅ GET VARIABLES
     #################################################
 
-    - name: Get mtom
+    - name: Get variables
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request={{ request_sys_id }}"
         method: GET
@@ -60,7 +71,7 @@
       register: mtom
 
     #################################################
-    # ✅ DEBUG VARIABLES (IMPORTANT)
+    # ✅ DEBUG VARIABLES
     #################################################
 
     - name: Show variables
@@ -68,14 +79,14 @@
         var: mtom.json.result
 
     #################################################
-    # ✅ GET HOSTNAME VALUE
+    # ✅ EXTRACT HOSTNAME
     #################################################
 
     - name: Extract option sys_id
       set_fact:
         option_sys_id: "{{ mtom.json.result[0].sc_item_option.value }}"
 
-    - name: Get hostname
+    - name: Get hostname value
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
         method: GET
@@ -88,24 +99,24 @@
         target_host: "{{ opt.json.result.value }}"
 
     #################################################
-    # ✅ SHOW FINAL HOST VALUE
+    # ✅ DEBUG FINAL VALUE
     #################################################
 
-    - name: Show hostname from SR
+    - name: Show hostname
       debug:
-        msg: "✅ Host picked from ServiceNow = {{ target_host }}"
+        msg: "✅ Host selected = {{ target_host }}"
 
     #################################################
-    # ✅ VALIDATION
+    # ✅ VALIDATION (STRONG ✅)
     #################################################
 
     - name: Validate host exists
       fail:
-        msg: "❌ Host not found in inventory → {{ target_host }}"
+        msg: "❌ Invalid host: {{ target_host }}"
       when: target_host not in groups['all']
 
     #################################################
-    # ✅ ADD HOST WITH REAL CONNECTION
+    # ✅ ADD HOST CORRECTLY
     #################################################
 
     - name: Add dynamic host
@@ -123,12 +134,11 @@
   hosts: dynamic_targets
   gather_facts: yes
   become: yes
-  become_method: sudo
 
   tasks:
 
     #################################################
-    # ✅ CONFIRM TARGET HOST
+    # ✅ VERIFY EXECUTION HOST
     #################################################
 
     - name: Confirm execution host
@@ -139,13 +149,12 @@
     # ✅ CHECK INSTALL
     #################################################
 
-    - name: Check Datadog
+    - name: Check Datadog installation
       stat:
         path: /etc/datadog-agent/datadog.yaml
       register: dd
 
-    - name: Show install status
-      debug:
+    - debug:
         msg: "Installed = {{ dd.stat.exists }}"
 
     #################################################
@@ -197,28 +206,22 @@
     # ✅ START SERVICE
     #################################################
 
-    - name: Ensure Datadog running
+    - name: Ensure Datadog agent running
       service:
         name: datadog-agent
         state: started
         enabled: yes
 
     #################################################
-    # ✅ VERIFY STATUS
+    # ✅ VERIFY
     #################################################
 
     - name: Check service status
       shell: systemctl is-active datadog-agent
       register: dd_status
 
-    - name: Show service status
-      debug:
+    - debug:
         msg: "✅ Datadog service = {{ dd_status.stdout }}"
 
-    #################################################
-    # ✅ FINAL SUCCESS
-    #################################################
-
-    - name: Final success
-      debug:
-        msg: "✅ Datadog installed successfully on {{ inventory_hostname }}"
+    - debug:
+        msg: "✅ Datadog installed on {{ inventory_hostname }}"

@@ -1,9 +1,5 @@
 #################################################
-# ✅ PLAY 1: GET SR + SET IN PROGRESS
-#################################################
-
-- name: Get SR and prepare execution
-  hosts: localhost
+# ✅ PLAY hosts: localhost# ✅ PLAY 1: GET SR + SET IN PROGRESS
   gather_facts: no
 
   vars:
@@ -22,9 +18,9 @@
         return_content: yes
       register: sn
 
-    - name: Validate SR exists
+    - name: Validate SR
       fail:
-        msg: "❌ No ServiceNow SR found"
+        msg: "❌ No SR found"
       when: sn.json.result | length == 0
 
     - name: Extract IDs
@@ -41,7 +37,7 @@
         body_format: json
         body:
           state: "2"
-          work_notes: "🚀 Datadog installation started by AAP"
+          work_notes: "🚀 Datadog install started"
 
     #################################################
     # ✅ GET TARGET HOST
@@ -59,7 +55,7 @@
       set_fact:
         sorted_mtom: "{{ mtom.json.result | sort(attribute='sys_created_on') }}"
 
-    - name: Extract option sys_id
+    - name: Extract option
       set_fact:
         option_sys_id: "{{ sorted_mtom[-1].sc_item_option.value }}"
 
@@ -75,7 +71,7 @@
       set_fact:
         target_host: "{{ opt.json.result.value }}"
 
-    - name: Add dynamic host
+    - name: Add host
       add_host:
         name: "{{ target_host }}"
         groups: dynamic_targets
@@ -83,7 +79,7 @@
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG (STABLE ✅)
+# ✅ PLAY 2: INSTALL DATADOG (FINAL ✅)
 #################################################
 
 - name: Install Datadog
@@ -103,7 +99,7 @@
         # ✅ INSTALL DEPENDENCIES
         #################################################
 
-        - name: Install required packages
+        - name: Install dependencies
           apt:
             name:
               - curl
@@ -113,33 +109,36 @@
             update_cache: yes
 
         #################################################
-        # ✅ ADD DATADOG KEY (FIXED ✅)
+        # ✅ DOWNLOAD KEY (NO GPG ✅ NO HANG ✅)
         #################################################
 
-        - name: Add Datadog GPG key
-          shell: |
-            curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public \
-            | gpg --dearmor -o /usr/share/keyrings/datadog-archive-keyring.gpg
-          args:
-            executable: /bin/bash
+        - name: Download Datadog keyring
+          get_url:
+            url: https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.gpg
+            dest: /usr/share/keyrings/datadog-archive-keyring.gpg
+            mode: '0644'
 
         #################################################
         # ✅ ADD REPO
         #################################################
 
-        - name: Configure Datadog repo
+        - name: Add Datadog repo
           copy:
             dest: /etc/apt/sources.list.d/datadog.list
             content: |
               deb [signed-by=/usr/share/keyrings/datadog-archive-keyring.gpg] https://apt.datadoghq.com/ stable 7
 
         #################################################
-        # ✅ UPDATE + INSTALL
+        # ✅ UPDATE
         #################################################
 
-        - name: Update apt cache
+        - name: Update apt
           apt:
             update_cache: yes
+
+        #################################################
+        # ✅ INSTALL AGENT
+        #################################################
 
         - name: Install Datadog agent
           apt:
@@ -147,16 +146,16 @@
             state: present
 
         #################################################
-        # ✅ CONFIGURE AGENT
+        # ✅ CONFIGURE
         #################################################
 
-        - name: Set Datadog API key
+        - name: Set API key
           lineinfile:
             path: /etc/datadog-agent/datadog.yaml
             regexp: "^api_key:"
             line: "api_key: {{ datadog_api_key }}"
 
-        - name: Set Datadog site
+        - name: Set site
           lineinfile:
             path: /etc/datadog-agent/datadog.yaml
             regexp: "^site:"
@@ -166,7 +165,7 @@
         # ✅ START SERVICE
         #################################################
 
-        - name: Start Datadog service
+        - name: Start Datadog
           service:
             name: datadog-agent
             state: started
@@ -236,5 +235,8 @@
         body_format: json
         body:
           state: "-5"
-          work_notes: "❌ Datadog installation failed via AAP"
+          work_notes: "❌ Datadog install failed via AAP"
       when: not (hostvars['dynamic_targets'][0].install_success | default(false))
+#################################################
+
+- name: Get SR and prepare execution

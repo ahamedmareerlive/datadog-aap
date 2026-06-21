@@ -1,13 +1,12 @@
 #################################################
-# ✅ PLAY 1: SERVICENOW
+# ✅ PLAY 1: SERVICENOW → GET HOSTNAME
 #################################################
 
 - name: Process ServiceNow SR
   hosts: localhost
   gather_facts: no
-
   vars:
-    ansible_become: false   # ✅ FORCE FIX
+    ansible_become: false   # ✅ disable sudo for localhost
 
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
 
@@ -53,13 +52,14 @@
 
 
 #################################################
-# ✅ PLAY 2: DATADOG INSTALL
+# ✅ PLAY 2: INSTALL DATADOG (FINAL ✅)
 #################################################
 
 - name: Install Datadog Agent
   hosts: dynamic_targets
   gather_facts: yes
-  become: no
+  become: yes                # ✅ MUST
+  become_method: sudo       # ✅ correct method
 
   tasks:
 
@@ -71,25 +71,55 @@
     - debug:
         msg: "Installed = {{ dd.stat.exists }}"
 
+    #################################################
+    # ✅ CLEAN OLD FILES
+    #################################################
+
+    - name: Remove old keyring
+      file:
+        path: /usr/share/keyrings/datadog-archive-keyring.gpg
+        state: absent
+      when: ansible_os_family == "Debian"
+
+    #################################################
+    # ✅ DOWNLOAD SCRIPT
+    #################################################
+
     - name: Download installer
       get_url:
         url: https://install.datadoghq.com/scripts/install_script_agent7.sh
-        dest: /home/ubuntu/datadog_install.sh
+        dest: /tmp/datadog_install.sh
         mode: '0755'
+        force: yes
       when: not dd.stat.exists
+
+    #################################################
+    # ✅ INSTALL DATADOG
+    #################################################
 
     - name: Install Datadog
       shell: |
         DD_API_KEY={{ datadog_api_key }} \
         DD_SITE="us5.datadoghq.com" \
         DD_AGENT_MAJOR_VERSION=7 \
-        bash /home/ubuntu/datadog_install.sh
+        DD_APM_INSTRUMENTATION_ENABLED=host \
+        DD_DATA_STREAMS_ENABLED=true \
+        DD_PROFILING_ENABLED=auto \
+        DD_LOGS_CONFIG_PROCESS_COLLECT_ALL=true \
+        bash /tmp/datadog_install.sh
       args:
         executable: /bin/bash
       when: not dd.stat.exists
 
-    - name: Start service
+    #################################################
+    # ✅ SERVICE
+    #################################################
+
+    - name: Start Datadog
       service:
         name: datadog-agent
         state: started
         enabled: yes
+
+    - debug:
+        msg: "✅ Datadog installed successfully"

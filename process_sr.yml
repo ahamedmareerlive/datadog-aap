@@ -1,5 +1,5 @@
 #################################################
-# ✅ PLAY 1: SERVICENOW → RESOLVE REAL HOSTNAME
+# ✅ PLAY 1: SERVICENOW → GET HOSTNAME
 #################################################
 
 - name: Process ServiceNow SR
@@ -13,7 +13,7 @@
   tasks:
 
     #################################################
-    # ✅ STEP 1: GET REQUEST ITEM
+    # ✅ STEP 1: GET SR
     #################################################
 
     - name: Get ServiceNow Request Item
@@ -26,21 +26,23 @@
         return_content: yes
       register: sn_response
 
-    - debug:
+    - name: DEBUG - SR response
+      debug:
         var: sn_response.json
 
     #################################################
     # ✅ STEP 2: GET SYS_ID
     #################################################
 
-    - set_fact:
+    - name: Extract sys_id
+      set_fact:
         request_sys_id: "{{ sn_response.json.result[0].sys_id }}"
 
     - debug:
         msg: "Request SYS_ID = {{ request_sys_id }}"
 
     #################################################
-    # ✅ STEP 3: GET MTOM RECORD
+    # ✅ STEP 3: GET MTOM DATA
     #################################################
 
     - name: Get mtom records
@@ -59,14 +61,15 @@
     # ✅ STEP 4: GET OPTION SYS_ID
     #################################################
 
-    - set_fact:
+    - name: Extract option sys_id
+      set_fact:
         option_sys_id: "{{ mtom_response.json.result[0].sc_item_option.value }}"
 
     - debug:
         msg: "Option SYS_ID = {{ option_sys_id }}"
 
     #################################################
-    # ✅ STEP 5: GET ACTUAL VALUE ✅ FINAL FIX
+    # ✅ STEP 5: GET REAL VALUE ✅
     #################################################
 
     - name: Get actual variable value
@@ -82,34 +85,33 @@
         var: option_response.json
 
     #################################################
-    # ✅ STEP 6: EXTRACT REAL HOSTNAME ✅
+    # ✅ STEP 6: EXTRACT HOSTNAME ✅
     #################################################
 
-    - set_fact:
+    - name: Set target hostname
+      set_fact:
         target_host: "{{ option_response.json.result.value }}"
 
     - debug:
         msg: "✅ FINAL HOSTNAME = {{ target_host }}"
 
-    #################################################
-    # ✅ STEP 7: VALIDATE
-    #################################################
-
-    - fail:
+    - name: Fail if empty
+      fail:
         msg: "Hostname extraction failed"
       when: target_host is not defined or target_host == ""
 
     #################################################
-    # ✅ STEP 8: ADD HOST
+    # ✅ STEP 7: ADD HOST
     #################################################
 
-    - add_host:
+    - name: Add host dynamically
+      add_host:
         name: "{{ target_host }}"
         groups: dynamic_targets
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG
+# ✅ PLAY 2: INSTALL DATADOG AGENT
 #################################################
 
 - name: Install Datadog Agent
@@ -122,17 +124,33 @@
 
   tasks:
 
-    - debug:
+    #################################################
+    # ✅ DEBUG CONNECTION
+    #################################################
+
+    - name: Connected host
+      debug:
         msg: "Connected to {{ inventory_hostname }}"
 
-    - debug:
+    - name: OS Info
+      debug:
         msg: "OS = {{ ansible_os_family }}"
 
-    - fail:
+    #################################################
+    # ✅ VALIDATE API KEY
+    #################################################
+
+    - name: Validate Datadog API key
+      fail:
         msg: "Datadog API key missing"
       when: datadog_api_key is not defined or datadog_api_key == ""
 
-    - stat:
+    #################################################
+    # ✅ CHECK INSTALL
+    #################################################
+
+    - name: Check if installed
+      stat:
         path: /etc/datadog-agent/datadog.yaml
       register: dd_installed
 
@@ -140,19 +158,68 @@
         msg: "Already installed = {{ dd_installed.stat.exists }}"
 
     #################################################
-    # ✅ INSTALL
+    # ✅ DEBIAN INSTALL
     #################################################
 
-    - name: Install on Debian
+    - name: Install prerequisites
       apt:
-        name: datadog-agent
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - gnupg
         state: present
         update_cache: yes
       when:
         - ansible_os_family == "Debian"
         - not dd_installed.stat.exists
 
-    - name: Install on RHEL
+    - name: Add Datadog APT key
+      apt_key:
+        url: https://keys.datadoghq.com/DATADOG_APT_KEY.public
+        state: present
+      when:
+        - ansible_os_family == "Debian"
+        - not dd_installed.stat.exists
+
+    - name: Add Datadog repository
+      apt_repository:
+        repo: "deb https://apt.datadoghq.com/ stable 7"
+        state: present
+      when:
+        - ansible_os_family == "Debian"
+        - not dd_installed.stat.exists
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+      when:
+        - ansible_os_family == "Debian"
+        - not dd_installed.stat.exists
+
+    - name: Install Datadog agent (Debian)
+      apt:
+        name: datadog-agent
+        state: present
+      when:
+        - ansible_os_family == "Debian"
+        - not dd_installed.stat.exists
+
+    #################################################
+    # ✅ RHEL INSTALL
+    #################################################
+
+    - name: Add Datadog YUM repo
+      yum_repository:
+        name: datadog
+        description: Datadog Repo
+        baseurl: https://yum.datadoghq.com/stable/7/x86_64/
+        gpgcheck: yes
+        gpgkey: https://keys.datadoghq.com/DATADOG_RPM_KEY.public
+      when:
+        - ansible_os_family == "RedHat"
+        - not dd_installed.stat.exists
+
+    - name: Install Datadog agent (RHEL)
       yum:
         name: datadog-agent
         state: present
@@ -161,22 +228,31 @@
         - not dd_installed.stat.exists
 
     #################################################
-    # ✅ CONFIG
+    # ✅ CONFIGURATION
     #################################################
 
-    - lineinfile:
+    - name: Configure API key
+      lineinfile:
         path: /etc/datadog-agent/datadog.yaml
         regexp: '^api_key:'
         line: "api_key: {{ datadog_api_key }}"
 
+    - name: Configure site
+      lineinfile:
+        path: /etc/datadog-agent/datadog.yaml
+        regexp: '^# site:'
+        line: "site: {{ datadog_site }}"
+
     #################################################
-    # ✅ SERVICE
+    # ✅ START SERVICE
     #################################################
 
-    - service:
+    - name: Start Datadog agent
+      service:
         name: datadog-agent
         state: started
         enabled: yes
 
-    - debug:
-        msg: "✅ Datadog installed successfully"
+    - name: Final status
+      debug:
+        msg: "✅ Datadog installed successfully on {{ inventory_hostname }}"

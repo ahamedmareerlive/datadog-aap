@@ -1,5 +1,5 @@
 #################################################
-# ✅ PLAY 1: SERVICENOW → GET HOSTNAME
+# ✅ PLAY 1: SERVICENOW
 #################################################
 
 - name: Process ServiceNow SR
@@ -7,6 +7,8 @@
   gather_facts: no
 
   vars:
+    ansible_become: false   # ✅ FORCE FIX
+
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
 
   tasks:
@@ -18,7 +20,6 @@
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
         force_basic_auth: yes
-        return_content: yes
       register: sn
 
     - set_fact:
@@ -52,7 +53,7 @@
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG (FINAL ✅)
+# ✅ PLAY 2: DATADOG INSTALL
 #################################################
 
 - name: Install Datadog Agent
@@ -62,17 +63,13 @@
 
   tasks:
 
-    - name: Check Datadog installed
+    - name: Check Datadog
       stat:
         path: /etc/datadog-agent/datadog.yaml
       register: dd
 
     - debug:
         msg: "Installed = {{ dd.stat.exists }}"
-
-    #################################################
-    # ✅ DOWNLOAD SCRIPT (NEW PATH ✅)
-    #################################################
 
     - name: Download installer
       get_url:
@@ -81,33 +78,18 @@
         mode: '0755'
       when: not dd.stat.exists
 
-    #################################################
-    # ✅ INSTALL
-    #################################################
-
     - name: Install Datadog
       shell: |
         DD_API_KEY={{ datadog_api_key }} \
         DD_SITE="us5.datadoghq.com" \
         DD_AGENT_MAJOR_VERSION=7 \
-        DD_APM_INSTRUMENTATION_ENABLED=host \
-        DD_DATA_STREAMS_ENABLED=true \
-        DD_PROFILING_ENABLED=auto \
-        DD_LOGS_CONFIG_PROCESS_COLLECT_ALL=true \
         bash /home/ubuntu/datadog_install.sh
       args:
         executable: /bin/bash
       when: not dd.stat.exists
 
-    #################################################
-    # ✅ START SERVICE
-    #################################################
-
-    - name: Ensure service running
+    - name: Start service
       service:
         name: datadog-agent
         state: started
         enabled: yes
-
-    - debug:
-        msg: "✅ Datadog installed successfully"

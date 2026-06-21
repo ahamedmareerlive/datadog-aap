@@ -1,21 +1,17 @@
 #################################################
-# ✅ PLAY 1: GET HOST FROM SERVICENOW (NO SUDO)
+# ✅ PLAY 1: SERVICENOW → GET HOST
 #################################################
 
-- name: Get target host from ServiceNow
+- name: Get target host
   hosts: localhost
   gather_facts: no
-  become: no    # ✅ VERY IMPORTANT (fix sudo error)
+  become: no
 
   vars:
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
     search_text: "Datadog"
 
   tasks:
-
-    #################################################
-    # ✅ GET LATEST SR
-    #################################################
 
     - name: Get latest SR
       uri:
@@ -26,14 +22,6 @@
         force_basic_auth: yes
         return_content: yes
       register: sn
-
-    - name: Debug SR
-      debug:
-        msg: "SR={{ sn.json.result[0].number }} | {{ sn.json.result[0].short_description }}"
-
-    #################################################
-    # ✅ GET HOSTNAME VARIABLE
-    #################################################
 
     - name: Extract sys_id
       set_fact:
@@ -51,7 +39,7 @@
       set_fact:
         option_sys_id: "{{ mtom.json.result[0].sc_item_option.value }}"
 
-    - name: Get hostname value
+    - name: Get hostname
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
         method: GET
@@ -67,31 +55,27 @@
       set_fact:
         target_host: "{{ opt.json.result.value }}"
 
-    - name: Validate hostname
-      fail:
-        msg: "❌ Hostname not found in SR"
-      when: target_host is not defined or target_host == ""
-
-    - name: Debug target host
+    - name: Debug host
       debug:
-        msg: "TARGET HOST = {{ target_host }}"
+        msg: "Target from ServiceNow = {{ target_host }}"
 
     #################################################
-    # ✅ PASS TO NEXT PLAY (AAP SAFE)
+    # ✅ ADD HOST CORRECTLY ✅ (KEY FIX)
     #################################################
 
-    - name: Pass host to next play
-      set_stats:
-        data:
-          dynamic_target: "{{ target_host }}"
+    - name: Add host dynamically (FIXED)
+      add_host:
+        name: "{{ target_host }}"
+        groups: dynamic_targets
+        ansible_host: "{{ target_host }}"
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG ON CORRECT HOST
+# ✅ PLAY 2: INSTALL DATADOG
 #################################################
 
 - name: Install Datadog Agent
-  hosts: "{{ dynamic_target }}"
+  hosts: dynamic_targets
   gather_facts: yes
   become: yes
   become_method: sudo
@@ -99,7 +83,7 @@
   tasks:
 
     #################################################
-    # ✅ VERIFY CORRECT TARGET
+    # ✅ VERIFY HOST
     #################################################
 
     - name: Confirm execution host
@@ -107,51 +91,38 @@
         msg: "Running on {{ inventory_hostname }}"
 
     #################################################
-    # ✅ CHECK EXISTING INSTALL
+    # ✅ CHECK INSTALL
     #################################################
 
-    - name: Check Datadog installation
+    - name: Check Datadog
       stat:
         path: /etc/datadog-agent/datadog.yaml
       register: dd
 
-    - name: Show install status
-      debug:
+    - debug:
         msg: "Installed = {{ dd.stat.exists }}"
 
     #################################################
-    # ✅ CLEAN OLD CONFIG (MULTI-OS SAFE)
+    # ✅ CLEAN OLD CONFIG
     #################################################
 
     - name: Remove Debian keyring
       file:
         path: /usr/share/keyrings/datadog-archive-keyring.gpg
         state: absent
-      when:
-        - ansible_os_family == "Debian"
-        - not dd.stat.exists
-
-    - name: Remove Debian repo
-      file:
-        path: /etc/apt/sources.list.d/datadog.list
-        state: absent
-      when:
-        - ansible_os_family == "Debian"
-        - not dd.stat.exists
+      when: ansible_os_family == "Debian" and not dd.stat.exists
 
     - name: Remove RHEL repo
       file:
         path: /etc/yum.repos.d/datadog.repo
         state: absent
-      when:
-        - ansible_os_family == "RedHat"
-        - not dd.stat.exists
+      when: ansible_os_family == "RedHat" and not dd.stat.exists
 
     #################################################
-    # ✅ DOWNLOAD INSTALL SCRIPT
+    # ✅ DOWNLOAD
     #################################################
 
-    - name: Download Datadog installer
+    - name: Download installer
       get_url:
         url: https://install.datadoghq.com/scripts/install_script_agent7.sh
         dest: /tmp/datadog_install.sh
@@ -160,49 +131,36 @@
       when: not dd.stat.exists
 
     #################################################
-    # ✅ INSTALL DATADOG
+    # ✅ INSTALL
     #################################################
 
-    - name: Install Datadog agent
+    - name: Install Datadog
       shell: |
         DD_API_KEY={{ datadog_api_key }} \
         DD_SITE="us5.datadoghq.com" \
         DD_AGENT_MAJOR_VERSION=7 \
-        DD_APM_INSTRUMENTATION_ENABLED=host \
-        DD_DATA_STREAMS_ENABLED=true \
-        DD_PROFILING_ENABLED=auto \
-        DD_LOGS_CONFIG_PROCESS_COLLECT_ALL=true \
         bash /tmp/datadog_install.sh
       args:
         executable: /bin/bash
       when: not dd.stat.exists
 
     #################################################
-    # ✅ ENSURE SERVICE IS RUNNING
+    # ✅ SERVICE
     #################################################
 
-    - name: Ensure Datadog agent running
+    - name: Ensure service
       service:
         name: datadog-agent
         state: started
         enabled: yes
 
-    #################################################
-    # ✅ VERIFY SERVICE
-    #################################################
-
-    - name: Check service status
+    - name: Verify service
       shell: systemctl is-active datadog-agent
       register: dd_status
 
-    - name: Show status
-      debug:
+    - debug:
         msg: "Datadog service = {{ dd_status.stdout }}"
 
-    #################################################
-    # ✅ SUCCESS
-    #################################################
+    - debug:
+        msg: "✅ Installed on {{ inventory_hostname }}"
 
-    - name: Final success
-      debug:
-        msg: "✅ Datadog installed on {{ inventory_hostname }}"

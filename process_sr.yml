@@ -1,5 +1,5 @@
 #################################################
-# ✅ PLAY 1: SERVICENOW → GET TARGET HOSTNAME
+# ✅ PLAY 1: SERVICENOW → GET HOSTNAME
 #################################################
 
 - name: Process ServiceNow SR
@@ -48,13 +48,13 @@
         return_content: yes
       register: option_response
 
-    - name: Set target hostname
+    - name: Set hostname
       set_fact:
         target_host: "{{ option_response.json.result.value }}"
 
     - name: Validate hostname
       fail:
-        msg: "❌ Hostname extraction failed"
+        msg: "Hostname extraction failed"
       when: target_host is not defined or target_host == ""
 
     - name: Add host dynamically
@@ -64,7 +64,7 @@
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG AGENT (SAFE METHOD ✅)
+# ✅ PLAY 2: INSTALL DATADOG AGENT (FINAL ✅)
 #################################################
 
 - name: Install Datadog Agent
@@ -83,38 +83,38 @@
 
     - name: Validate Datadog API key
       fail:
-        msg: "❌ Datadog API key missing"
+        msg: "Datadog API key missing"
       when: datadog_api_key is not defined or datadog_api_key == ""
 
     #################################################
-    # ✅ CHECK IF ALREADY INSTALLED
+    # ✅ CHECK EXISTING INSTALL
     #################################################
 
-    - name: Check Datadog installation
+    - name: Check Datadog installed
       stat:
         path: /etc/datadog-agent/datadog.yaml
       register: dd_installed
 
-    - name: Show install status
+    - name: Debug status
       debug:
         msg: "Already installed = {{ dd_installed.stat.exists }}"
 
     #################################################
-    # ✅ STEP 1 → DOWNLOAD INSTALL SCRIPT
+    # ✅ DOWNLOAD AGENT 7 SCRIPT ✅
     #################################################
 
-    - name: Download Datadog install script
+    - name: Download Datadog Agent 7 install script
       get_url:
-        url: https://s3.amazonaws.com/dd-agent/scripts/install_script.sh
+        url: https://s3.amazonaws.com/dd-agent/scripts/install_script_agent7.sh
         dest: /tmp/datadog_install.sh
         mode: '0755'
       when: not dd_installed.stat.exists
 
     #################################################
-    # ✅ STEP 2 → EXECUTE INSTALL SCRIPT
+    # ✅ EXECUTE SCRIPT ✅
     #################################################
 
-    - name: Execute Datadog install script
+    - name: Run Datadog Agent 7 install script
       shell: |
         DD_API_KEY={{ datadog_api_key }} \
         DD_SITE={{ datadog_site }} \
@@ -124,19 +124,19 @@
       when: not dd_installed.stat.exists
 
     #################################################
-    # ✅ STEP 3 → ENSURE SERVICE RUNNING
+    # ✅ ENSURE SERVICE ✅
     #################################################
 
-    - name: Ensure Datadog agent is running
+    - name: Ensure Datadog agent running
       service:
         name: datadog-agent
         state: started
         enabled: yes
 
     #################################################
-    # ✅ FINAL SUCCESS
+    # ✅ SUCCESS ✅
     #################################################
 
     - name: Success message
       debug:
-        msg: "✅ Datadog installed successfully on {{ inventory_hostname }}"
+        msg: "✅ Datadog Agent 7 installed successfully on {{ inventory_hostname }}"

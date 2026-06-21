@@ -1,8 +1,8 @@
 #################################################
-# ✅ PLAY 1: SERVICENOW DEBUG + EXTRACTION
+# ✅ PLAY 1: SERVICENOW → GET TARGET HOSTNAME
 #################################################
 
-- name: Debug ServiceNow SR
+- name: Process ServiceNow SR
   hosts: localhost
   gather_facts: no
   become: no
@@ -13,7 +13,7 @@
   tasks:
 
     #################################################
-    # ✅ STEP 1: GET SR
+    # ✅ STEP 1: GET REQUEST ITEM
     #################################################
 
     - name: Get ServiceNow Request Item
@@ -26,7 +26,7 @@
         return_content: yes
       register: sn_response
 
-    - name: DEBUG - Full SR response
+    - name: DEBUG - SR Response
       debug:
         var: sn_response.json
 
@@ -43,12 +43,12 @@
         msg: "Request SYS_ID = {{ request_sys_id }}"
 
     #################################################
-    # ✅ STEP 3: GET VARIABLES (FIXED QUERY)
+    # ✅ STEP 3: GET VARIABLES (FIXED)
     #################################################
 
-    - name: Get variables from ServiceNow
+    - name: Get variables (WITH display_value)
       uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request={{ request_sys_id }}"
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request={{ request_sys_id }}&sysparm_display_value=true"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
@@ -56,45 +56,39 @@
         return_content: yes
       register: var_response
 
-    - name: DEBUG - Raw variables response
+    - name: DEBUG - Variables Response
       debug:
         var: var_response.json
 
     #################################################
-    # ✅ STEP 4: VALIDATE VARIABLES EXIST
+    # ✅ STEP 4: VALIDATE VARIABLES
     #################################################
 
-    - name: DEBUG - Number of variables
-      debug:
-        msg: "Variables count = {{ var_response.json.result | length }}"
-
-    - name: Fail if no variables found
+    - name: Check variables exist
       fail:
         msg: "❌ No variables found in ServiceNow request"
       when: var_response.json.result | length == 0
 
     #################################################
-    # ✅ STEP 5: LOOP THROUGH VARIABLES (IMPORTANT)
+    # ✅ STEP 5: SHOW VARIABLES
     #################################################
 
-    - name: DEBUG - Loop all variables
+    - name: DEBUG - Show all variables
       debug:
-        msg: "Variable value = {{ item.sc_item_option.value }}"
+        msg: "Variable display value = {{ item.sc_item_option.display_value }}"
       loop: "{{ var_response.json.result }}"
-      loop_control:
-        label: "{{ item.sc_item_option.value }}"
 
     #################################################
-    # ✅ STEP 6: EXTRACT TARGET
+    # ✅ STEP 6: EXTRACT HOSTNAME ✅ IMPORTANT
     #################################################
 
     - name: Extract target hostname
       set_fact:
-        target_host: "{{ var_response.json.result[0].sc_item_option.value }}"
+        target_host: "{{ var_response.json.result[0].sc_item_option.display_value }}"
 
-    - name: DEBUG - Extracted target
+    - name: DEBUG - Final hostname
       debug:
-        msg: "✅ TARGET HOST = {{ target_host }}"
+        msg: "✅ TARGET HOSTNAME = {{ target_host }}"
 
     #################################################
     # ✅ STEP 7: ADD HOST
@@ -107,7 +101,7 @@
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG (FULL DEBUG)
+# ✅ PLAY 2: INSTALL DATADOG AGENT
 #################################################
 
 - name: Install Datadog Agent
@@ -121,7 +115,7 @@
   tasks:
 
     #################################################
-    # ✅ STEP 1: SHOW TARGET NODE
+    # ✅ STEP 1: VERIFY HOST
     #################################################
 
     - name: DEBUG - Connected host
@@ -129,27 +123,18 @@
         msg: "Connected to {{ inventory_hostname }}"
 
     #################################################
-    # ✅ STEP 2: SHOW OS DETAILS
+    # ✅ STEP 2: OS INFO
     #################################################
 
     - name: DEBUG - OS Family
       debug:
         msg: "OS Family = {{ ansible_os_family }}"
 
-    - name: DEBUG - Distribution
-      debug:
-        msg: "Distribution = {{ ansible_distribution }}"
-
     #################################################
-    # ✅ STEP 3: VALIDATE API KEY
+    # ✅ STEP 3: CHECK API KEY
     #################################################
 
-    - name: Check API key
-      debug:
-        msg: "Datadog API Key is set ✅"
-      when: datadog_api_key is defined
-
-    - name: Fail if API key missing
+    - name: Validate Datadog API key
       fail:
         msg: "❌ Datadog API key missing"
       when: datadog_api_key is not defined or datadog_api_key == ""
@@ -163,18 +148,13 @@
         path: /etc/datadog-agent/datadog.yaml
       register: dd_installed
 
-    - name: DEBUG - Already installed?
+    - name: DEBUG - Already installed
       debug:
-        msg: "Datadog already installed = {{ dd_installed.stat.exists }}"
+        msg: "Installed = {{ dd_installed.stat.exists }}"
 
     #################################################
     # ✅ DEBIAN INSTALL
     #################################################
-
-    - name: DEBUG - Debian flow
-      debug:
-        msg: "Installing on Debian system"
-      when: ansible_os_family == "Debian"
 
     - name: Add APT key
       apt_key:
@@ -203,11 +183,6 @@
     # ✅ RHEL INSTALL
     #################################################
 
-    - name: DEBUG - RHEL flow
-      debug:
-        msg: "Installing on RHEL system"
-      when: ansible_os_family == "RedHat"
-
     - name: Add YUM repo
       yum_repository:
         name: datadog
@@ -228,26 +203,28 @@
     # ✅ CONFIG
     #################################################
 
-    - name: Set API key
+    - name: Configure API key
       lineinfile:
         path: /etc/datadog-agent/datadog.yaml
         regexp: '^api_key:'
         line: "api_key: {{ datadog_api_key }}"
 
-    - name: DEBUG - API key configured
-      debug:
-        msg: "✅ API key added"
+    - name: Configure site
+      lineinfile:
+        path: /etc/datadog-agent/datadog.yaml
+        regexp: '^# site:'
+        line: "site: {{ datadog_site }}"
 
     #################################################
     # ✅ SERVICE
     #################################################
 
-    - name: Start Datadog service
+    - name: Start Datadog agent
       service:
         name: datadog-agent
         state: started
         enabled: yes
 
-    - name: DEBUG - Service status
+    - name: DEBUG - Final status
       debug:
-        msg: "✅ Datadog agent is running"
+        msg: "✅ Datadog agent installed and running"

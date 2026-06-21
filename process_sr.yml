@@ -7,7 +7,7 @@
   gather_facts: no
 
   vars:
-    servicenow_instance: "://service-now.com"
+    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
     search_text: "Datadog"
 
   tasks:
@@ -49,14 +49,13 @@
         method: PATCH
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
-        force_basic_auth: yes
         body_format: json
         body:
           state: "2"
           work_notes: "🚀 Datadog installation started from AAP"
 
     #################################################
-    # ✅ GET HOSTNAME
+    # ✅ GET HOST
     #################################################
 
     - name: Get variables
@@ -65,14 +64,13 @@
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
-        force_basic_auth: yes
       register: mtom
 
     - name: Sort variables
       set_fact:
         sorted_mtom: "{{ mtom.json.result | sort(attribute='sys_created_on') }}"
 
-    - name: Get latest option id
+    - name: Extract latest option
       set_fact:
         option_sys_id: "{{ sorted_mtom[-1].sc_item_option.value }}"
 
@@ -82,7 +80,6 @@
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
-        force_basic_auth: yes
       register: opt
 
     - name: Set target host
@@ -101,11 +98,11 @@
       add_host:
         name: "{{ target_host }}"
         groups: dynamic_targets
-        ansible_host: "{{ hostvars[target_host].ansible_host | default(target_host) }}"
+        ansible_host: "{{ hostvars[target_host].ansible_host }}"
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG (APT METHOD ✅)
+# ✅ PLAY 2: INSTALL DATADOG (STABLE ✅)
 #################################################
 
 - name: Install Datadog
@@ -115,8 +112,7 @@
 
   tasks:
 
-    - name: Confirm host
-      debug:
+    - debug:
         msg: "🚀 Running on {{ inventory_hostname }}"
 
     - block:
@@ -135,25 +131,24 @@
             update_cache: yes
 
         #################################################
-        # ✅ ADD DATADOG KEY (DIRECT KEYRING DOWNLOAD)
+        # ✅ ADD DATADOG KEY (BINARY ✅)
         #################################################
 
-        - name: Download pre-dearmored Datadog keyring file directly
+        - name: Download Datadog keyring
           get_url:
-            url: https://datadoghq.com
+            url: https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.gpg
             dest: /usr/share/keyrings/datadog-archive-keyring.gpg
             mode: '0644'
 
         #################################################
-        # ✅ ADD REPO
+        # ✅ ADD REPOSITORY
         #################################################
 
         - name: Add Datadog repo
           copy:
             dest: /etc/apt/sources.list.d/datadog.list
             content: |
-              deb [signed-by=/usr/share/keyrings/datadog-archive-keyring.gpg] https://datadoghq.com stable 7
-            mode: '0644'
+              deb [signed-by=/usr/share/keyrings/datadog-archive-keyring.gpg] https://apt.datadoghq.com/ stable 7
 
         #################################################
         # ✅ UPDATE CACHE
@@ -164,7 +159,7 @@
             update_cache: yes
 
         #################################################
-        # ✅ INSTALL DATADOG
+        # ✅ INSTALL AGENT
         #################################################
 
         - name: Install datadog-agent
@@ -186,25 +181,25 @@
           lineinfile:
             path: /etc/datadog-agent/datadog.yaml
             regexp: "^site:"
-            line: "site: ://datadoghq.com"
+            line: "site: us5.datadoghq.com"
 
         #################################################
         # ✅ START SERVICE
         #################################################
 
-        - name: Start Datadog
+        - name: Start Datadog agent
           service:
             name: datadog-agent
             state: started
             enabled: yes
 
-        - name: Mark success on host
+        - name: Mark success
           set_fact:
             install_success: true
 
       rescue:
 
-        - name: Mark failure on host
+        - name: Mark failure
           set_fact:
             install_success: false
 
@@ -218,59 +213,49 @@
   gather_facts: no
 
   vars:
-    servicenow_instance: "://service-now.com"
-    execution_host: "{{ groups['dynamic_targets'] | default('') }}"
-    was_successful: "{{ hostvars[execution_host]['install_success'] | default(false) if execution_host else false }}"
+    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
 
   tasks:
 
-    - name: Fail early if no dynamic target was parsed
-      fail:
-        msg: "❌ Playbook aborted: target host definition missing"
-      when: execution_host == ""
-
     #################################################
-    # ✅ SUCCESS CASE
+    # ✅ SUCCESS
     #################################################
 
-    - name: Close RITM (Success)
+    - name: Close RITM
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
         method: PATCH
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
-        force_basic_auth: yes
         body_format: json
         body:
           state: "3"
           work_notes: "✅ Datadog installed successfully via AAP"
-      when: was_successful
+      when: hostvars['dynamic_targets'][0].install_success | default(false)
 
-    - name: Close REQUEST (Success)
+    - name: Close REQUEST
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_request/{{ request_sys_id }}"
         method: PATCH
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
-        force_basic_auth: yes
         body_format: json
         body:
           state: "3"
-      when: was_successful
+      when: hostvars['dynamic_targets'][0].install_success | default(false)
 
     #################################################
-    # ❌ FAILURE CASE
+    # ❌ FAILURE
     #################################################
 
-    - name: Set RITM to Pending (Failure)
+    - name: Set RITM to Pending
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
         method: PATCH
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
-        force_basic_auth: yes
         body_format: json
         body:
           state: "-5"
           work_notes: "❌ Datadog installation failed via AAP"
-      when: not was_successful
+      when: not (hostvars['dynamic_targets'][0].install_success | default(false))

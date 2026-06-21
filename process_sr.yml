@@ -1,63 +1,51 @@
 #################################################
-# ✅ PLAY 1: READ SERVICENOW REQUEST
+# ✅ PLAY 1: READ SERVICENOW (NO SUDO)
 #################################################
 
 - name: Process ServiceNow SR
   hosts: localhost
   gather_facts: no
+  become: no        # ✅ IMPORTANT FIX
 
   vars:
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
 
   tasks:
 
-    # ✅ Get SR from ServiceNow
     - name: Get ServiceNow Request Item
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=state=1"
         method: GET
-        user: "{{ snow_user }}"           # ✅ FIXED
-        password: "{{ snow_password }}"   # ✅ FIXED
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
         force_basic_auth: yes
         return_content: yes
         headers:
           Accept: "application/json"
       register: sn_response
 
-    # ✅ Debug response (optional – remove later)
-    - name: Debug ServiceNow response
-      debug:
-        var: sn_response.json
-
-    # ✅ Extract hostname from catalog variable
     - name: Extract target hostname
       set_fact:
         target_host: "{{ sn_response.json.result[0].variables.target }}"
 
-    # ✅ Validate
     - name: Fail if target missing
       fail:
-        msg: "Target hostname not found in ServiceNow request"
+        msg: "Target hostname not found"
       when: target_host is not defined or target_host == ""
 
-    # ✅ Show target
-    - name: Show target
-      debug:
-        msg: "Target = {{ target_host }}"
-
-    # ✅ Add host dynamically
     - name: Add host dynamically
       add_host:
         name: "{{ target_host }}"
         groups: dynamic_targets
 
+
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG
+# ✅ PLAY 2: INSTALL DATADOG (WITH SUDO)
 #################################################
 
 - name: Install Datadog Agent
   hosts: dynamic_targets
-  become: yes
+  become: yes       # ✅ Only here
   gather_facts: yes
 
   vars:
@@ -65,21 +53,15 @@
 
   tasks:
 
-    # ✅ Validate API key
     - name: Check API key
       fail:
         msg: "Datadog API key missing"
       when: datadog_api_key is not defined or datadog_api_key == ""
 
-    # ✅ Check existing install
-    - name: Check if Datadog installed
+    - name: Check if installed
       stat:
         path: /etc/datadog-agent/datadog.yaml
       register: dd_installed
-
-    #################################################
-    # ✅ DEBIAN / UBUNTU
-    #################################################
 
     - name: Add Datadog APT key
       apt_key:
@@ -88,7 +70,7 @@
         - ansible_os_family == "Debian"
         - not dd_installed.stat.exists
 
-    - name: Add Datadog repo
+    - name: Add Datadog repo (Debian)
       apt_repository:
         repo: "deb https://apt.datadoghq.com/ stable 7"
       when:
@@ -104,18 +86,11 @@
         - ansible_os_family == "Debian"
         - not dd_installed.stat.exists
 
-    #################################################
-    # ✅ RHEL / AMAZON LINUX
-    #################################################
-
-    - name: Add Datadog yum repo
+    - name: Add Datadog repo (RHEL)
       yum_repository:
         name: datadog
-        description: Datadog Repo
         baseurl: https://yum.datadoghq.com/stable/7/x86_64/
-        gpgcheck: yes
         gpgkey: https://keys.datadoghq.com/DATADOG_RPM_KEY.public
-        enabled: yes
       when:
         - ansible_os_family == "RedHat"
         - not dd_installed.stat.exists
@@ -123,14 +98,9 @@
     - name: Install Datadog (RHEL)
       yum:
         name: datadog-agent
-        state: present
       when:
         - ansible_os_family == "RedHat"
         - not dd_installed.stat.exists
-
-    #################################################
-    # ✅ CONFIGURATION
-    #################################################
 
     - name: Set API key
       lineinfile:
@@ -138,19 +108,8 @@
         regexp: '^api_key:'
         line: "api_key: {{ datadog_api_key }}"
 
-    - name: Set site
-      lineinfile:
-        path: /etc/datadog-agent/datadog.yaml
-        regexp: '^# site:'
-        line: "site: {{ datadog_site }}"
-
-    #################################################
-    # ✅ START SERVICE
-    #################################################
-
-    - name: Ensure Datadog service running
+    - name: Start Datadog service
       service:
         name: datadog-agent
         state: started
         enabled: yes
-

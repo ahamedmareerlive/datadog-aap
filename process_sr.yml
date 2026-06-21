@@ -64,7 +64,7 @@
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG (OFFICIAL METHOD ✅)
+# ✅ PLAY 2: INSTALL DATADOG (FINAL FIX ✅)
 #################################################
 
 - name: Install Datadog Agent
@@ -104,9 +104,9 @@
     #################################################
 
     - name: Install Datadog Agent (official script)
-      shell: >
-        DD_API_KEY={{ datadog_api_key }}
-        DD_SITE={{ datadog_site }}
+      shell: |
+        DD_API_KEY={{ datadog_api_key }} \
+        DD_SITE={{ datadog_site }} \
         bash -c "$(curl -L https://s3.amazonaws.com/dd-agent/scripts/install_script.sh)"
       args:
         executable: /bin/bash
@@ -126,6 +126,6 @@
     # ✅ SUCCESS MESSAGE
     #################################################
 
-    - name: Final success
+    - name: Success message
       debug:
         msg: "✅ Datadog installed successfully on {{ inventory_hostname }}"

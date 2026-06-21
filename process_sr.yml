@@ -1,8 +1,8 @@
 #################################################
-# ✅ PLAY 1: SERVICENOW → CORRECT VARIABLE
+# ✅ PLAY 1: GET SR + SET IN PROGRESS
 #################################################
 
-- name: Get latest ServiceNow SR
+- name: Process ServiceNow SR
   hosts: localhost
   gather_facts: no
   become: no
@@ -27,11 +27,24 @@
         return_content: yes
       register: sn
 
-    - debug:
-        msg: "✅ Ticket = {{ sn.json.result[0].number }}"
-
     - set_fact:
-        request_sys_id: "{{ sn.json.result[0].sys_id }}"
+        request_item_sys_id: "{{ sn.json.result[0].sys_id }}"
+        request_sys_id: "{{ sn.json.result[0].request.value }}"
+
+    #################################################
+    # ✅ MARK RITM AS IN PROGRESS ✅
+    #################################################
+
+    - name: Set RITM to In Progress
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        body_format: json
+        body:
+          state: "2"
+      register: ritm_progress
 
     #################################################
     # ✅ GET VARIABLES
@@ -39,40 +52,27 @@
 
     - name: Get mtom
       uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request={{ request_sys_id }}"
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request={{ request_item_sys_id }}"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
       register: mtom
 
     #################################################
-    # ✅ SORT VARIABLES BY DATE ✅
+    # ✅ PICK LATEST VARIABLE
     #################################################
 
-    - name: Sort mtom by sys_created_on
-      set_fact:
+    - set_fact:
         sorted_mtom: "{{ mtom.json.result | sort(attribute='sys_created_on') }}"
 
-    #################################################
-    # ✅ PICK LATEST VARIABLE ✅ (CRITICAL FIX)
-    #################################################
-
-    - name: Extract latest variable sys_id
-      set_fact:
+    - set_fact:
         option_sys_id: "{{ sorted_mtom[-1].sc_item_option.value }}"
 
     #################################################
-    # ✅ DEBUG SELECTED SYS_ID
+    # ✅ GET HOSTNAME
     #################################################
 
-    - debug:
-        msg: "✅ Selected option sys_id = {{ option_sys_id }}"
-
-    #################################################
-    # ✅ GET FINAL VALUE
-    #################################################
-
-    - name: Get hostname value
+    - name: Get hostname
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
         method: GET
@@ -80,24 +80,18 @@
         password: "{{ snow_password }}"
       register: opt
 
-    - name: Set target host
-      set_fact:
+    - set_fact:
         target_host: "{{ opt.json.result.value }}"
 
-    #################################################
-    # ✅ FINAL DEBUG ✅
-    #################################################
-
     - debug:
-        msg: "✅ FINAL HOST = {{ target_host }}"
+        msg: "✅ Target Host = {{ target_host }}"
 
     #################################################
-    # ✅ VALIDATION
+    # ✅ VALIDATE
     #################################################
 
-    - name: Validate host exists
-      fail:
-        msg: "❌ Invalid host: {{ target_host }}"
+    - fail:
+        msg: "Invalid host"
       when: target_host not in groups['all']
 
     #################################################
@@ -111,45 +105,102 @@
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG
+# ✅ PLAY 2: INSTALL DATADOG + HANDLE RESULT
 #################################################
 
-- name: Install Datadog Agent
+- name: Install Datadog
   hosts: dynamic_targets
   gather_facts: yes
   become: yes
 
+  vars:
+    install_success: false
+
   tasks:
 
-    - debug:
-        msg: "🚀 Running on {{ inventory_hostname }}"
+    #################################################
+    # ✅ INSTALL BLOCK
+    #################################################
 
-    - stat:
-        path: /etc/datadog-agent/datadog.yaml
-      register: dd
+    - block:
 
-    - debug:
-        msg: "Installed = {{ dd.stat.exists }}"
+        - name: Check Datadog
+          stat:
+            path: /etc/datadog-agent/datadog.yaml
+          register: dd
 
-    - get_url:
-        url: https://install.datadoghq.com/scripts/install_script_agent7.sh
-        dest: /tmp/datadog_install.sh
-        mode: '0755'
-      when: not dd.stat.exists
+        - name: Install Datadog
+          shell: |
+            DD_API_KEY={{ datadog_api_key }} \
+            DD_SITE="us5.datadoghq.com" \
+            bash /tmp/datadog_install.sh
+          when: not dd.stat.exists
 
-    - shell: |
-        DD_API_KEY={{ datadog_api_key }} \
-        DD_SITE="us5.datadoghq.com" \
-        bash /tmp/datadog_install.sh
-      when: not dd.stat.exists
+        - name: Start service
+          service:
+            name: datadog-agent
+            state: started
+            enabled: yes
 
-    - service:
-        name: datadog-agent
-        state: started
-        enabled: yes
+        - name: Mark success
+          set_fact:
+            install_success: true
 
-    - shell: systemctl is-active datadog-agent
-      register: status
+      rescue:
 
-    - debug:
-        msg: "✅ Datadog service = {{ status.stdout }}"
+        - name: Mark failure
+          set_fact:
+            install_success: false
+
+
+#################################################
+# ✅ PLAY 3: UPDATE SERVICENOW BASED ON RESULT
+#################################################
+
+- name: Update ServiceNow Status
+  hosts: localhost
+  gather_facts: no
+  become: no
+
+  tasks:
+
+    #################################################
+    # ✅ SUCCESS CASE
+    #################################################
+
+    - name: Close RITM (Complete)
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        body_format: json
+        body:
+          state: "3"
+      when: hostvars['dynamic_targets'][0].install_success | default(false)
+
+    - name: Close REQUEST (Complete)
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_request/{{ request_sys_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        body_format: json
+        body:
+          state: "3"
+      when: hostvars['dynamic_targets'][0].install_success | default(false)
+
+    #################################################
+    # ❌ FAILURE CASE
+    #################################################
+
+    - name: Set RITM to Pending
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        body_format: json
+        body:
+          state: "-5"
+      when: not (hostvars['dynamic_targets'][0].install_success | default(false))

@@ -1,0 +1,98 @@
+- name: Install Datadog Agent (Cross Platform)
+  hosts: dynamic_targets
+  become: yes
+  gather_facts: yes
+
+  vars:
+    datadog_site: "datadoghq.com"
+
+  tasks:
+
+    - name: Validate API key
+      fail:
+        msg: "Datadog API key missing"
+      when: datadog_api_key is not defined or datadog_api_key == ""
+
+    - name: Check if already installed
+      stat:
+        path: /etc/datadog-agent/datadog.yaml
+      register: dd_installed
+
+    #################################################
+    # 🟢 Debian / Ubuntu
+    #################################################
+
+    - name: Add Datadog APT key
+      apt_key:
+        url: https://keys.datadoghq.com/DATADOG_APT_KEY.public
+        state: present
+      when:
+        - ansible_os_family == "Debian"
+        - not dd_installed.stat.exists
+
+    - name: Add Datadog repo
+      apt_repository:
+        repo: "deb https://apt.datadoghq.com/ stable 7"
+        state: present
+      when:
+        - ansible_os_family == "Debian"
+        - not dd_installed.stat.exists
+
+    - name: Install Datadog agent (Debian)
+      apt:
+        name: datadog-agent
+        state: present
+        update_cache: yes
+      when:
+        - ansible_os_family == "Debian"
+        - not dd_installed.stat.exists
+
+    #################################################
+    # 🟠 RHEL / Amazon Linux
+    #################################################
+
+    - name: Add Datadog yum repo
+      yum_repository:
+        name: datadog
+        description: Datadog Repo
+        baseurl: https://yum.datadoghq.com/stable/7/x86_64/
+        gpgcheck: yes
+        gpgkey: https://keys.datadoghq.com/DATADOG_RPM_KEY.public
+        enabled: yes
+      when:
+        - ansible_os_family == "RedHat"
+        - not dd_installed.stat.exists
+
+    - name: Install Datadog agent (RHEL)
+      yum:
+        name: datadog-agent
+        state: present
+      when:
+        - ansible_os_family == "RedHat"
+        - not dd_installed.stat.exists
+
+    #################################################
+    # 🔧 CONFIG
+    #################################################
+
+    - name: Set API key
+      lineinfile:
+        path: /etc/datadog-agent/datadog.yaml
+        regexp: '^api_key:'
+        line: "api_key: {{ datadog_api_key }}"
+
+    - name: Set site
+      lineinfile:
+        path: /etc/datadog-agent/datadog.yaml
+        regexp: '^# site:'
+        line: "site: {{ datadog_site }}"
+
+    #################################################
+    # 🚀 START SERVICE
+    #################################################
+
+    - name: Ensure Datadog running
+      service:
+        name: datadog-agent
+        state: started
+        enabled: yes

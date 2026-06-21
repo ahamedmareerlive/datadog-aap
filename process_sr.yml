@@ -1,0 +1,41 @@
+- name: Process ServiceNow SR
+  hosts: localhost
+  gather_facts: no
+
+  vars:
+    servicenow_instance: "your_instance"
+
+  tasks:
+
+    - name: Get SR details
+      uri:
+        url: "https://{{ servicenow_instance }}.service-now.com/api/now/table/sc_req_item?sysparm_query=state=1"
+        method: GET
+        user: "{{ sn_username }}"
+        password: "{{ sn_password }}"
+        force_basic_auth: yes
+        return_content: yes
+      register: sn_response
+
+    - name: Extract description
+      set_fact:
+        description: "{{ sn_response.json.result[0].description | lower }}"
+
+    - name: Extract target host (NAME)
+      set_fact:
+        target_host: "{{ description | regex_search('target:\\s*(\\S+)', '\\1') }}"
+
+    - name: Validate target
+      fail:
+        msg: "Target not found in SR"
+      when: target_host is not defined or target_host == ""
+
+    # ✅ Add host dynamically by NAME
+    - name: Add dynamic host
+      add_host:
+        name: "{{ target_host }}"
+        groups: dynamic_targets
+
+    # ✅ Call install
+    - name: Run install playbook
+      import_playbook: install_datadog_target.yml

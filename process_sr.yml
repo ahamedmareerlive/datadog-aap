@@ -24,7 +24,7 @@
 
     - name: Validate SR exists
       fail:
-        msg: "❌ No ServiceNow SR found"
+        msg: "❌ No SR found"
       when: sn.json.result | length == 0
 
     - name: Extract IDs
@@ -32,7 +32,7 @@
         request_item_sys_id: "{{ sn.json.result[0].sys_id }}"
         request_sys_id: "{{ sn.json.result[0].request.value }}"
 
-    - name: Set RITM to In Progress
+    - name: Set RITM In Progress
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
         method: PATCH
@@ -55,11 +55,11 @@
         password: "{{ snow_password }}"
       register: mtom
 
-    - name: Extract latest variable
+    - name: Extract latest option
       set_fact:
         option_sys_id: "{{ (mtom.json.result | sort(attribute='sys_created_on'))[-1].sc_item_option.value }}"
 
-    - name: Get hostname value
+    - name: Get hostname
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
         method: GET
@@ -79,22 +79,22 @@
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG (FINAL STABLE ✅)
+# ✅ PLAY 2: INSTALL DATADOG
 #################################################
 
-- name: Install Datadog Agent
+- name: Install Datadog
   hosts: dynamic_targets
   become: yes
   gather_facts: yes
 
   tasks:
 
-    - name: Debug target
+    - name: Debug host
       debug:
         msg: "🚀 Installing Datadog on {{ inventory_hostname }}"
 
     #################################################
-    # ✅ CHECK IF ALREADY INSTALLED (IDEMPOTENT)
+    # ✅ CHECK IF ALREADY INSTALLED
     #################################################
 
     - name: Check Datadog installed
@@ -103,22 +103,17 @@
       register: dd_installed
 
     #################################################
-    # ✅ INSTALL ONLY IF NOT INSTALLED
+    # ✅ INSTALL IF NOT PRESENT
     #################################################
 
     - block:
 
-        - name: Remove old Datadog key (clean state)
-          file:
-            path: /usr/share/keyrings/datadog-archive-keyring.gpg
-            state: absent
-
-        - name: Clean apt cache
+        - name: Clean apt
           shell: |
             rm -rf /var/lib/apt/lists/*
             apt-get clean
 
-        - name: Update apt cache
+        - name: Update apt
           apt:
             update_cache: yes
 
@@ -129,24 +124,22 @@
               - apt-transport-https
             state: present
 
-        - name: Download Datadog key (stable ✅)
-          get_url:
-            url: https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.gpg
-            dest: /usr/share/keyrings/datadog-archive-keyring.gpg
-            mode: '0644'
-            force: yes
+        - name: Add Datadog key (correct)
+          shell: |
+            curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public \
+            | gpg --dearmor -o /usr/share/keyrings/datadog-archive-keyring.gpg
 
-        - name: Add Datadog repository
+        - name: Add Datadog repo
           copy:
             dest: /etc/apt/sources.list.d/datadog.list
             content: |
               deb [signed-by=/usr/share/keyrings/datadog-archive-keyring.gpg] https://apt.datadoghq.com/ stable 7
 
-        - name: Update apt after repo
+        - name: Update apt again
           apt:
             update_cache: yes
 
-        - name: Install Datadog agent
+        - name: Install datadog-agent
           apt:
             name: datadog-agent
             state: present
@@ -154,7 +147,7 @@
       when: not dd_installed.stat.exists
 
     #################################################
-    # ✅ CONFIGURE + START (ALWAYS)
+    # ✅ CONFIGURE AGENT
     #################################################
 
     - name: Configure API key
@@ -169,19 +162,43 @@
         regexp: "^site:"
         line: "site: us5.datadoghq.com"
 
-    - name: Ensure Datadog running
+    - name: Start Datadog
       service:
         name: datadog-agent
         state: started
         enabled: yes
 
-    - name: Mark success
+
+#################################################
+# ✅ PLAY 3: VERIFY WITH DATADOG API
+#################################################
+
+- name: Verify Datadog Host
+  hosts: localhost
+  gather_facts: no
+
+  tasks:
+
+    - name: Check host in Datadog
+      uri:
+        url: "https://api.us5.datadoghq.com/api/v1/hosts?filter={{ target_host }}"
+        method: GET
+        headers:
+          DD-API-KEY: "{{ datadog_api_key }}"
+          DD-APPLICATION-KEY: "{{ datadog_app_key }}"
+        return_content: yes
+      register: dd_check
+
+    - name: Validate Datadog host
       set_fact:
-        install_success: true
+        datadog_ok: "{{ dd_check.json.host_list | length > 0 }}"
+
+    - debug:
+        msg: "✅ Datadog status = {{ datadog_ok }}"
 
 
 #################################################
-# ✅ PLAY 3: UPDATE SERVICENOW
+# ✅ PLAY 4: UPDATE SERVICENOW BASED ON API
 #################################################
 
 - name: Update ServiceNow
@@ -193,7 +210,11 @@
 
   tasks:
 
-    - name: Close RITM (SUCCESS)
+    #################################################
+    # ✅ SUCCESS (ONLY IF HOST IN DATADOG)
+    #################################################
+
+    - name: Close RITM
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
         method: PATCH
@@ -202,10 +223,10 @@
         body_format: json
         body:
           state: "3"
-          work_notes: "✅ Datadog installed successfully via AAP"
-      when: hostvars['dynamic_targets'][0].install_success | default(true)
+          work_notes: "✅ Datadog installed and verified in Datadog UI"
+      when: datadog_ok
 
-    - name: Close REQUEST
+    - name: Close Request
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_request/{{ request_sys_id }}"
         method: PATCH
@@ -214,4 +235,20 @@
         body_format: json
         body:
           state: "3"
-      when: hostvars['dynamic_targets'][0].install_success | default(true)
+      when: datadog_ok
+
+    #################################################
+    # ❌ FAILURE (NOT REPORTING)
+    #################################################
+
+    - name: Set RITM Pending
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        body_format: json
+        body:
+          state: "-5"
+          work_notes: "❌ Datadog agent not reporting in Datadog"
+      when: not datadog_ok

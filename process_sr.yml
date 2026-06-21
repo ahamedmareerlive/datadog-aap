@@ -1,5 +1,5 @@
 #################################################
-# ✅ PLAY 1: SERVICENOW → GET TARGET HOSTNAME
+# ✅ PLAY 1: SERVICENOW → FILTER + LATEST SR
 #################################################
 
 - name: Process ServiceNow SR
@@ -10,11 +10,18 @@
     ansible_become: false
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
 
+    # ✅ CHANGE THIS BASED ON YOUR USE CASE
+    search_text: "Datadog"
+
   tasks:
 
-    - name: Get ServiceNow Request Item
+    #################################################
+    # ✅ GET LATEST SR WITH SAME DESCRIPTION
+    #################################################
+
+    - name: Get latest SR by description
       uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=state=1&sysparm_limit=1"
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=short_descriptionLIKE{{ search_text }}^ORDERBYDESCsys_created_on&sysparm_limit=1"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
@@ -22,9 +29,21 @@
         return_content: yes
       register: sn
 
+    #################################################
+    # ✅ DEBUG SR
+    #################################################
+
+    - name: Show selected SR
+      debug:
+        msg: "SR: {{ sn.json.result[0].number }} | Desc: {{ sn.json.result[0].short_description }}"
+
     - name: Extract sys_id
       set_fact:
         request_sys_id: "{{ sn.json.result[0].sys_id }}"
+
+    #################################################
+    # ✅ GET VARIABLES (HOSTNAME)
+    #################################################
 
     - name: Get mtom records
       uri:
@@ -39,7 +58,7 @@
       set_fact:
         option_sys_id: "{{ mtom.json.result[0].sc_item_option.value }}"
 
-    - name: Get hostname
+    - name: Get hostname value
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
         method: GET
@@ -48,23 +67,23 @@
         return_content: yes
       register: opt
 
-    - name: Set target hostname
+    - name: Set target host
       set_fact:
         target_host: "{{ opt.json.result.value }}"
 
     - name: Validate hostname
       fail:
-        msg: "❌ Hostname extraction failed"
+        msg: "❌ No hostname found in SR"
       when: target_host is not defined or target_host == ""
 
-    - name: Add dynamic host
+    - name: Add dynamic target
       add_host:
         name: "{{ target_host }}"
         groups: dynamic_targets
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG (MULTI-OS ✅)
+# ✅ PLAY 2: MULTI‑OS DATADOG INSTALL
 #################################################
 
 - name: Install Datadog Agent
@@ -76,15 +95,15 @@
   tasks:
 
     #################################################
-    # ✅ DEBUG OS TYPE (IMPORTANT)
+    # ✅ SHOW OS TYPE
     #################################################
 
     - name: Show OS
       debug:
-        msg: "OS Family: {{ ansible_os_family }}"
+        msg: "OS Family = {{ ansible_os_family }}"
 
     #################################################
-    # ✅ CHECK EXISTING INSTALL
+    # ✅ CHECK INSTALL
     #################################################
 
     - name: Check Datadog installation
@@ -97,7 +116,7 @@
         msg: "Installed = {{ dd.stat.exists }}"
 
     #################################################
-    # ✅ CLEAN OLD FILES (OS-AWARE ✅)
+    # ✅ CLEAN OLD CONFIG (MULTI‑OS SAFE)
     #################################################
 
     - name: Remove Debian keyring
@@ -125,10 +144,10 @@
         - not dd.stat.exists
 
     #################################################
-    # ✅ DOWNLOAD INSTALL SCRIPT
+    # ✅ DOWNLOAD SCRIPT
     #################################################
 
-    - name: Download Datadog Agent 7 installer
+    - name: Download Datadog installer
       get_url:
         url: https://install.datadoghq.com/scripts/install_script_agent7.sh
         dest: /tmp/datadog_install.sh
@@ -137,7 +156,7 @@
       when: not dd.stat.exists
 
     #################################################
-    # ✅ INSTALL DATADOG (UNIVERSAL SCRIPT ✅)
+    # ✅ INSTALL DATADOG
     #################################################
 
     - name: Install Datadog Agent
@@ -155,30 +174,31 @@
       when: not dd.stat.exists
 
     #################################################
-    # ✅ ENSURE SERVICE RUNNING
+    # ✅ ENSURE SERVICE
     #################################################
 
-    - name: Ensure Datadog agent running
+    - name: Ensure Datadog running
       service:
         name: datadog-agent
         state: started
         enabled: yes
 
     #################################################
-    # ✅ FINAL STATUS CHECK
+    # ✅ VERIFY STATUS
     #################################################
 
-    - name: Check agent status
+    - name: Check service status
       shell: systemctl is-active datadog-agent
-      register: dd_service
+      register: dd_status
 
-    - debug:
-        msg: "Datadog service status = {{ dd_service.stdout }}"
+    - name: Show service state
+      debug:
+        msg: "Datadog service = {{ dd_status.stdout }}"
 
     #################################################
-    # ✅ SUCCESS MESSAGE
+    # ✅ SUCCESS
     #################################################
 
     - name: Final success
       debug:
-        msg: "✅ Datadog installed successfully on {{ inventory_hostname }}"
+        msg: "✅ Datadog installed on {{ inventory_hostname }}"

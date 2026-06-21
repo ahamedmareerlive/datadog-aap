@@ -1,5 +1,5 @@
 #################################################
-# ✅ PLAY 1: GET SR + UPDATE START
+# ✅ PLAY 1: GET SR + SET IN PROGRESS
 #################################################
 
 - name: Get SR and prepare execution
@@ -26,17 +26,21 @@
         return_content: yes
       register: sn
 
-    - name: Fail if no SR
+    - name: Validate SR exists
       fail:
-        msg: "❌ No SR found"
+        msg: "❌ No matching SR found"
       when: sn.json.result | length == 0
 
-    - set_fact:
+    - name: Extract IDs
+      set_fact:
         request_item_sys_id: "{{ sn.json.result[0].sys_id }}"
         request_sys_id: "{{ sn.json.result[0].request.value }}"
 
+    - debug:
+        msg: "✅ Selected Ticket = {{ sn.json.result[0].number }}"
+
     #################################################
-    # ✅ MARK IN PROGRESS
+    # ✅ SET RITM → IN PROGRESS
     #################################################
 
     - name: Set RITM to In Progress
@@ -48,7 +52,7 @@
         body_format: json
         body:
           state: "2"
-          work_notes: "🚀 Automation started from AAP"
+          work_notes: "🚀 Datadog installation started from AAP"
 
     #################################################
     # ✅ GET HOSTNAME
@@ -62,10 +66,12 @@
         password: "{{ snow_password }}"
       register: mtom
 
-    - set_fact:
+    - name: Sort variables
+      set_fact:
         sorted_mtom: "{{ mtom.json.result | sort(attribute='sys_created_on') }}"
 
-    - set_fact:
+    - name: Get latest option id
+      set_fact:
         option_sys_id: "{{ sorted_mtom[-1].sc_item_option.value }}"
 
     - name: Get hostname value
@@ -76,13 +82,19 @@
         password: "{{ snow_password }}"
       register: opt
 
-    - set_fact:
+    - name: Set target host
+      set_fact:
         target_host: "{{ opt.json.result.value }}"
 
     - debug:
         msg: "✅ TARGET HOST = {{ target_host }}"
 
-    - name: Add host dynamically
+    - name: Validate host
+      fail:
+        msg: "❌ Invalid host {{ target_host }}"
+      when: target_host not in groups['all']
+
+    - name: Add dynamic host
       add_host:
         name: "{{ target_host }}"
         groups: dynamic_targets
@@ -90,7 +102,7 @@
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG (FRESH ✅)
+# ✅ PLAY 2: INSTALL DATADOG (APT METHOD ✅)
 #################################################
 
 - name: Install Datadog
@@ -100,37 +112,88 @@
 
   tasks:
 
-    #################################################
-    # ✅ INSTALL (CLEAN STYLE)
-    #################################################
+    - name: Confirm host
+      debug:
+        msg: "🚀 Running on {{ inventory_hostname }}"
 
     - block:
 
-        - name: Download Datadog script
-          get_url:
-            url: https://install.datadoghq.com/scripts/install_script_agent7.sh
-            dest: /tmp/datadog_install.sh
-            mode: '0755'
+        #################################################
+        # ✅ INSTALL DEPENDENCIES
+        #################################################
 
-        - name: Run Datadog installer
+        - name: Install dependencies
+          apt:
+            name:
+              - curl
+              - gnupg
+              - apt-transport-https
+            state: present
+            update_cache: yes
+
+        #################################################
+        # ✅ ADD DATADOG KEY
+        #################################################
+
+        - name: Add Datadog GPG key
           shell: |
-            DD_API_KEY={{ datadog_api_key }} \
-            DD_SITE="us5.datadoghq.com" \
-            DD_AGENT_MAJOR_VERSION=7 \
-            bash /tmp/datadog_install.sh
-          register: dd_install
+            curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public | gpg --dearmor -o /usr/share/keyrings/datadog-archive-keyring.gpg
 
-        - name: Show output
-          debug:
-            var: dd_install.stdout_lines
+        #################################################
+        # ✅ ADD REPO
+        #################################################
 
-        - name: Ensure service running
+        - name: Add Datadog repo
+          copy:
+            dest: /etc/apt/sources.list.d/datadog.list
+            content: |
+              deb [signed-by=/usr/share/keyrings/datadog-archive-keyring.gpg] https://apt.datadoghq.com/ stable 7
+
+        #################################################
+        # ✅ UPDATE CACHE
+        #################################################
+
+        - name: Update apt cache
+          apt:
+            update_cache: yes
+
+        #################################################
+        # ✅ INSTALL DATADOG
+        #################################################
+
+        - name: Install datadog-agent
+          apt:
+            name: datadog-agent
+            state: present
+
+        #################################################
+        # ✅ CONFIGURE AGENT
+        #################################################
+
+        - name: Set API key
+          lineinfile:
+            path: /etc/datadog-agent/datadog.yaml
+            regexp: "^api_key:"
+            line: "api_key: {{ datadog_api_key }}"
+
+        - name: Set site
+          lineinfile:
+            path: /etc/datadog-agent/datadog.yaml
+            regexp: "^site:"
+            line: "site: us5.datadoghq.com"
+
+        #################################################
+        # ✅ START SERVICE
+        #################################################
+
+        - name: Start Datadog
           service:
             name: datadog-agent
             state: started
             enabled: yes
 
-        - set_fact:
+        - name: Mark success
+          set_fact:
             install_success: true
 
       rescue:
@@ -141,7 +204,7 @@
 
 
 #################################################
-# ✅ PLAY 3: UPDATE SERVICENOW (FINAL)
+# ✅ PLAY 3: UPDATE SERVICENOW
 #################################################
 
 - name: Update ServiceNow

@@ -1,25 +1,37 @@
 #################################################
+# ✅ GLOBAL VARS
+#################################################
+
+- name: GLOBAL VARS HOLDER
+  hosts: localhost
+  gather_facts: no
+  vars:
+    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
+    search_text: "Datadog"
+  tasks: []
+
+
+#################################################
 # ✅ PLAY 1: GET SR + SET IN PROGRESS
 #################################################
 
-- name: Process ServiceNow SR
+- name: Get SR and prepare execution
   hosts: localhost
   gather_facts: no
   become: no
 
   vars:
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
-    search_text: "Datadog"
 
   tasks:
 
-    #################################################
+    ############################
     # ✅ GET LATEST SR
-    #################################################
+    ############################
 
     - name: Get latest SR
       uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=short_descriptionLIKE{{ search_text }}^active=true^state=1&sysparm_order_by_desc=sys_created_on&sysparm_limit=1"
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=short_descriptionLIKEDatadog^active=true^state=1&sysparm_order_by_desc=sys_created_on&sysparm_limit=1"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
@@ -27,13 +39,17 @@
         return_content: yes
       register: sn
 
-    - set_fact:
+    - name: Extract IDs
+      set_fact:
         request_item_sys_id: "{{ sn.json.result[0].sys_id }}"
         request_sys_id: "{{ sn.json.result[0].request.value }}"
 
-    #################################################
-    # ✅ MARK RITM AS IN PROGRESS ✅
-    #################################################
+    - debug:
+        msg: "✅ Selected Ticket = {{ sn.json.result[0].number }}"
+
+    ############################
+    # ✅ SET RITM → IN PROGRESS
+    ############################
 
     - name: Set RITM to In Progress
       uri:
@@ -44,13 +60,12 @@
         body_format: json
         body:
           state: "2"
-      register: ritm_progress
 
-    #################################################
+    ############################
     # ✅ GET VARIABLES
-    #################################################
+    ############################
 
-    - name: Get mtom
+    - name: Get variables
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request={{ request_item_sys_id }}"
         method: GET
@@ -58,21 +73,23 @@
         password: "{{ snow_password }}"
       register: mtom
 
-    #################################################
+    ############################
     # ✅ PICK LATEST VARIABLE
-    #################################################
+    ############################
 
-    - set_fact:
+    - name: Sort variables
+      set_fact:
         sorted_mtom: "{{ mtom.json.result | sort(attribute='sys_created_on') }}"
 
-    - set_fact:
+    - name: Get latest option id
+      set_fact:
         option_sys_id: "{{ sorted_mtom[-1].sc_item_option.value }}"
 
-    #################################################
-    # ✅ GET HOSTNAME
-    #################################################
+    ############################
+    # ✅ GET HOST
+    ############################
 
-    - name: Get hostname
+    - name: Get hostname value
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
         method: GET
@@ -80,32 +97,35 @@
         password: "{{ snow_password }}"
       register: opt
 
-    - set_fact:
+    - name: Set host
+      set_fact:
         target_host: "{{ opt.json.result.value }}"
 
     - debug:
-        msg: "✅ Target Host = {{ target_host }}"
+        msg: "✅ TARGET HOST = {{ target_host }}"
 
-    #################################################
-    # ✅ VALIDATE
-    #################################################
+    ############################
+    # ✅ VALIDATE HOST
+    ############################
 
-    - fail:
-        msg: "Invalid host"
+    - name: Validate host
+      fail:
+        msg: "❌ Invalid host {{ target_host }}"
       when: target_host not in groups['all']
 
-    #################################################
+    ############################
     # ✅ ADD HOST
-    #################################################
+    ############################
 
-    - add_host:
+    - name: Add dynamic host
+      add_host:
         name: "{{ target_host }}"
         groups: dynamic_targets
         ansible_host: "{{ hostvars[target_host].ansible_host }}"
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG + HANDLE RESULT
+# ✅ PLAY 2: INSTALL DATADOG
 #################################################
 
 - name: Install Datadog
@@ -113,21 +133,25 @@
   gather_facts: yes
   become: yes
 
-  vars:
-    install_success: false
-
   tasks:
 
-    #################################################
-    # ✅ INSTALL BLOCK
-    #################################################
+    - name: Confirm host
+      debug:
+        msg: "🚀 Running on {{ inventory_hostname }}"
 
     - block:
 
-        - name: Check Datadog
+        - name: Check installation
           stat:
             path: /etc/datadog-agent/datadog.yaml
           register: dd
+
+        - name: Download installer
+          get_url:
+            url: https://install.datadoghq.com/scripts/install_script_agent7.sh
+            dest: /tmp/datadog_install.sh
+            mode: '0755'
+          when: not dd.stat.exists
 
         - name: Install Datadog
           shell: |
@@ -154,13 +178,16 @@
 
 
 #################################################
-# ✅ PLAY 3: UPDATE SERVICENOW BASED ON RESULT
+# ✅ PLAY 3: UPDATE SERVICENOW STATUS
 #################################################
 
-- name: Update ServiceNow Status
+- name: Update ServiceNow
   hosts: localhost
   gather_facts: no
   become: no
+
+  vars:
+    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
 
   tasks:
 
@@ -168,7 +195,7 @@
     # ✅ SUCCESS CASE
     #################################################
 
-    - name: Close RITM (Complete)
+    - name: Close RITM
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
         method: PATCH
@@ -179,7 +206,7 @@
           state: "3"
       when: hostvars['dynamic_targets'][0].install_success | default(false)
 
-    - name: Close REQUEST (Complete)
+    - name: Close REQUEST
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_request/{{ request_sys_id }}"
         method: PATCH

@@ -12,10 +12,6 @@
 
   tasks:
 
-    #################################################
-    # ✅ GET SR
-    #################################################
-
     - name: Get ServiceNow Request Item
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=state=1&sysparm_limit=1"
@@ -26,17 +22,9 @@
         return_content: yes
       register: sn_response
 
-    #################################################
-    # ✅ GET SYS_ID
-    #################################################
-
     - name: Extract sys_id
       set_fact:
         request_sys_id: "{{ sn_response.json.result[0].sys_id }}"
-
-    #################################################
-    # ✅ GET MTOM
-    #################################################
 
     - name: Get mtom records
       uri:
@@ -47,19 +35,11 @@
         return_content: yes
       register: mtom_response
 
-    #################################################
-    # ✅ GET OPTION SYS_ID
-    #################################################
-
     - name: Extract option sys_id
       set_fact:
         option_sys_id: "{{ mtom_response.json.result[0].sc_item_option.value }}"
 
-    #################################################
-    # ✅ GET REAL HOSTNAME
-    #################################################
-
-    - name: Get actual variable value
+    - name: Get actual hostname value
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
         method: GET
@@ -76,10 +56,6 @@
       fail:
         msg: "Hostname extraction failed"
       when: target_host is not defined or target_host == ""
-
-    #################################################
-    # ✅ ADD HOST
-    #################################################
 
     - name: Add host dynamically
       add_host:
@@ -102,7 +78,7 @@
   tasks:
 
     #################################################
-    # ✅ VALIDATOR
+    # ✅ VALIDATE API KEY
     #################################################
 
     - name: Validate Datadog API key
@@ -120,7 +96,7 @@
       register: dd_installed
 
     #################################################
-    # ✅ DEBIAN / UBUNTU (MODERN FIX ✅)
+    # ✅ DEBIAN / UBUNTU (FINAL FIX ✅)
     #################################################
 
     - name: Install prerequisites
@@ -136,19 +112,19 @@
         - ansible_os_family == "Debian"
         - not dd_installed.stat.exists
 
-    - name: Create keyrings directory
+    - name: Create keyring directory
       file:
-        path: /etc/apt/keyrings
+        path: /usr/share/keyrings
         state: directory
         mode: '0755'
       when:
         - ansible_os_family == "Debian"
         - not dd_installed.stat.exists
 
-    - name: Download Datadog GPG key ✅ FIXED URL
+    - name: Download Datadog GPG key ✅ CORRECT URL
       get_url:
-        url: "https://keys.datadoghq.com/DATADOG_APT_KEY.public"
-        dest: /etc/apt/keyrings/datadog.asc
+        url: https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public
+        dest: /usr/share/keyrings/datadog-archive-keyring.gpg
         mode: '0644'
       when:
         - ansible_os_family == "Debian"
@@ -158,7 +134,7 @@
       copy:
         dest: /etc/apt/sources.list.d/datadog.list
         content: |
-          deb [signed-by=/etc/apt/keyrings/datadog.asc] https://apt.datadoghq.com/ stable 7
+          deb [signed-by=/usr/share/keyrings/datadog-archive-keyring.gpg] https://apt.datadoghq.com/ stable 7
       when:
         - ansible_os_family == "Debian"
         - not dd_installed.stat.exists
@@ -170,7 +146,7 @@
         - ansible_os_family == "Debian"
         - not dd_installed.stat.exists
 
-    - name: Install Datadog agent (Debian)
+    - name: Install Datadog agent
       apt:
         name: datadog-agent
         state: present
@@ -179,10 +155,10 @@
         - not dd_installed.stat.exists
 
     #################################################
-    # ✅ RHEL
+    # ✅ RHEL / AMAZON LINUX
     #################################################
 
-    - name: Add Datadog YUM repo
+    - name: Add Datadog repo
       yum_repository:
         name: datadog
         description: Datadog Repo
@@ -230,4 +206,3 @@
     - name: Success message
       debug:
         msg: "✅ Datadog installed successfully on {{ inventory_hostname }}"
-

@@ -5,64 +5,53 @@
 - name: Process ServiceNow SR
   hosts: localhost
   gather_facts: no
-  become: no
 
   vars:
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
 
   tasks:
 
-    - name: Get ServiceNow Request Item
+    - name: Get SR
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=state=1&sysparm_limit=1"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
         force_basic_auth: yes
-        return_content: yes
-      register: sn_response
+      register: sn
 
-    - name: Extract sys_id
-      set_fact:
-        request_sys_id: "{{ sn_response.json.result[0].sys_id }}"
+    - set_fact:
+        request_sys_id: "{{ sn.json.result[0].sys_id }}"
 
-    - name: Get mtom records
+    - name: Get variables
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request={{ request_sys_id }}"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
-      register: mtom_response
+      register: mtom
 
-    - name: Extract option sys_id
-      set_fact:
-        option_sys_id: "{{ mtom_response.json.result[0].sc_item_option.value }}"
+    - set_fact:
+        option_sys_id: "{{ mtom.json.result[0].sc_item_option.value }}"
 
-    - name: Get actual hostname value
+    - name: Get hostname
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
-      register: option_response
+      register: opt
 
-    - name: Set target hostname
-      set_fact:
-        target_host: "{{ option_response.json.result.value }}"
+    - set_fact:
+        target_host: "{{ opt.json.result.value }}"
 
-    - name: Validate hostname
-      fail:
-        msg: "❌ Hostname extraction failed"
-      when: target_host is not defined or target_host == ""
-
-    - name: Add host dynamically
-      add_host:
+    - add_host:
         name: "{{ target_host }}"
         groups: dynamic_targets
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG (HARDCODED SITE ✅)
+# ✅ PLAY 2: INSTALL DATADOG (FINAL FIX ✅)
 #################################################
 
 - name: Install Datadog Agent
@@ -73,30 +62,36 @@
   tasks:
 
     #################################################
-    # ✅ VALIDATE API KEY
+    # ✅ CHECK INSTALL
     #################################################
 
-    - name: Validate Datadog API key
-      fail:
-        msg: "❌ Datadog API key missing"
-      when: datadog_api_key is not defined or datadog_api_key == ""
-
-    #################################################
-    # ✅ CHECK EXISTING INSTALL
-    #################################################
-
-    - name: Check Datadog installation
+    - name: Check Datadog
       stat:
         path: /etc/datadog-agent/datadog.yaml
       register: dd_installed
 
-    - name: Debug install status
-      debug:
-        msg: "Already installed = {{ dd_installed.stat.exists }}"
+    - debug:
+        msg: "Installed = {{ dd_installed.stat.exists }}"
 
     #################################################
-    # ✅ CLEAN OLD SCRIPT
+    # ✅ CLEAN OLD DATADOG FILES (CRITICAL ✅)
     #################################################
+
+    - name: Remove old Datadog repo
+      file:
+        path: /etc/apt/sources.list.d/datadog.list
+        state: absent
+      when:
+        - ansible_os_family == "Debian"
+        - not dd_installed.stat.exists
+
+    - name: Remove old keyring
+      file:
+        path: /usr/share/keyrings/datadog-archive-keyring.gpg
+        state: absent
+      when:
+        - ansible_os_family == "Debian"
+        - not dd_installed.stat.exists
 
     - name: Remove old script
       file:
@@ -105,10 +100,10 @@
       when: not dd_installed.stat.exists
 
     #################################################
-    # ✅ DOWNLOAD AGENT 7 SCRIPT
+    # ✅ DOWNLOAD LATEST INSTALL SCRIPT ✅
     #################################################
 
-    - name: Download Datadog Agent 7 script
+    - name: Download Agent 7 script
       get_url:
         url: https://install.datadoghq.com/scripts/install_script_agent7.sh
         dest: /tmp/datadog_install.sh
@@ -117,10 +112,10 @@
       when: not dd_installed.stat.exists
 
     #################################################
-    # ✅ EXECUTE SCRIPT (HARDCODED SITE ✅)
+    # ✅ INSTALL DATADOG ✅
     #################################################
 
-    - name: Execute Datadog installer
+    - name: Run installer
       shell: |
         DD_API_KEY={{ datadog_api_key }} \
         DD_SITE="us5.datadoghq.com" \
@@ -136,19 +131,18 @@
       when: not dd_installed.stat.exists
 
     #################################################
-    # ✅ ENSURE SERVICE RUNNING
+    # ✅ ENSURE SERVICE ✅
     #################################################
 
-    - name: Ensure Datadog agent is running
+    - name: Start service
       service:
         name: datadog-agent
         state: started
         enabled: yes
 
     #################################################
-    # ✅ SUCCESS
+    # ✅ SUCCESS ✅
     #################################################
 
-    - name: Success message
-      debug:
+    - debug:
         msg: "✅ Datadog installed successfully on {{ inventory_hostname }}"

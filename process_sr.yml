@@ -1,5 +1,5 @@
 #################################################
-# ✅ PLAY 1: GET SR + HOSTNAME
+# ✅ PLAY 1: SERVICE NOW → CORRECT VARIABLE EXTRACTION
 #################################################
 
 - name: Get latest ServiceNow SR
@@ -27,16 +27,14 @@
         return_content: yes
       register: sn
 
-    - name: Show selected SR
-      debug:
+    - debug:
         msg: "✅ Ticket = {{ sn.json.result[0].number }}"
 
-    - name: Extract sys_id
-      set_fact:
+    - set_fact:
         request_sys_id: "{{ sn.json.result[0].sys_id }}"
 
     #################################################
-    # ✅ GET VARIABLES
+    # ✅ GET MTOM RECORDS
     #################################################
 
     - name: Get mtom
@@ -47,47 +45,44 @@
         password: "{{ snow_password }}"
       register: mtom
 
-    - name: Debug variables
-      debug:
+    - debug:
         var: mtom.json.result
 
     #################################################
-    # ✅ GET OPTION SYS_ID (ONLY VARIABLE)
+    # ✅ LOOP AND FIND VARIABLE NAME = target ✅
     #################################################
 
-    - name: Extract option sys_id
-      set_fact:
-        option_sys_id: "{{ mtom.json.result[0].sc_item_option.value }}"
-
-    #################################################
-    # ✅ GET FINAL VALUE
-    #################################################
-
-    - name: Get hostname value
+    - name: Find correct variable (name=target)
       uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ item.sc_item_option.value }}"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
-      register: opt
+      loop: "{{ mtom.json.result }}"
+      register: option_details
 
-    - name: Set target host
+    #################################################
+    # ✅ PICK CORRECT VALUE
+    #################################################
+
+    - name: Extract correct hostname
       set_fact:
-        target_host: "{{ opt.json.result.value }}"
+        target_host: "{{ item.json.result.value }}"
+      loop: "{{ option_details.results }}"
+      when: item.json.result.name == "target"
 
     #################################################
-    # ✅ FINAL DEBUG ✅
+    # ✅ DEBUG FINAL HOST ✅
     #################################################
 
-    - name: Show extracted host
-      debug:
+    - debug:
         msg: "✅ FINAL HOST = {{ target_host }}"
 
     #################################################
     # ✅ VALIDATION
     #################################################
 
-    - name: Validate host exists
+    - name: Validate host
       fail:
         msg: "❌ Invalid host: {{ target_host }}"
       when: target_host not in groups['all']
@@ -96,8 +91,7 @@
     # ✅ ADD HOST
     #################################################
 
-    - name: Add dynamic host
-      add_host:
+    - add_host:
         name: "{{ target_host }}"
         groups: dynamic_targets
         ansible_host: "{{ hostvars[target_host].ansible_host }}"
@@ -114,12 +108,10 @@
 
   tasks:
 
-    - name: Confirm execution host
-      debug:
+    - debug:
         msg: "🚀 Running on {{ inventory_hostname }}"
 
-    - name: Check Datadog installation
-      stat:
+    - stat:
         path: /etc/datadog-agent/datadog.yaml
       register: dd
 
@@ -133,22 +125,20 @@
         mode: '0755'
       when: not dd.stat.exists
 
-    - name: Install Datadog
+    - name: Install agent
       shell: |
         DD_API_KEY={{ datadog_api_key }} \
         DD_SITE="us5.datadoghq.com" \
         bash /tmp/datadog_install.sh
       when: not dd.stat.exists
 
-    - name: Ensure service
-      service:
+    - service:
         name: datadog-agent
         state: started
         enabled: yes
 
-    - name: Check service
-      shell: systemctl is-active datadog-agent
+    - shell: systemctl is-active datadog-agent
       register: status
 
     - debug:
-        msg: "✅ Datadog service = {{ status.stdout }}"
+        msg: "✅ Datadog = {{ status.stdout }}"

@@ -1,5 +1,5 @@
 #################################################
-# ✅ PLAY 1: GET HOST FROM SERVICENOW
+# ✅ PLAY 1: SERVICENOW → GET CORRECT SR + VALUE
 #################################################
 
 - name: Get target host from ServiceNow
@@ -14,12 +14,12 @@
   tasks:
 
     #################################################
-    # ✅ GET LATEST SR
+    # ✅ GET LATEST SR (CORRECT SORTING ✅)
     #################################################
 
     - name: Get latest SR
       uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=short_descriptionLIKE{{ search_text }}^ORDERBYDESCsys_created_on&sysparm_limit=1"
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=short_descriptionLIKE{{ search_text }}&sysparm_order_by_desc=sys_created_on&sysparm_limit=1"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
@@ -27,22 +27,30 @@
         return_content: yes
       register: sn
 
-    - name: Debug SR
+    #################################################
+    # ✅ DEBUG WHICH TICKET IS USED
+    #################################################
+
+    - name: Show selected SR details
       debug:
-        msg: "SR={{ sn.json.result[0].number }} | {{ sn.json.result[0].short_description }}"
+        msg: >
+          ✅ Ticket = {{ sn.json.result[0].number }}
+          | Created = {{ sn.json.result[0].sys_created_on }}
+          | Description = {{ sn.json.result[0].short_description }}
 
     #################################################
     # ✅ EXTRACT SYS_ID
     #################################################
 
-    - set_fact:
+    - name: Extract sys_id
+      set_fact:
         request_sys_id: "{{ sn.json.result[0].sys_id }}"
 
     #################################################
-    # ✅ GET HOSTNAME VARIABLE
+    # ✅ GET VARIABLES (MTOM)
     #################################################
 
-    - name: Get mtom
+    - name: Get mtom variables
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request={{ request_sys_id }}"
         method: GET
@@ -50,8 +58,25 @@
         password: "{{ snow_password }}"
       register: mtom
 
-    - set_fact:
+    #################################################
+    # ✅ DEBUG ALL VARIABLES (IMPORTANT 🔥)
+    #################################################
+
+    - name: Show all variables from SR
+      debug:
+        var: mtom.json.result
+
+    #################################################
+    # ✅ GET OPTION SYS_ID
+    #################################################
+
+    - name: Extract option sys_id
+      set_fact:
         option_sys_id: "{{ mtom.json.result[0].sc_item_option.value }}"
+
+    #################################################
+    # ✅ GET FINAL VALUE
+    #################################################
 
     - name: Get hostname value
       uri:
@@ -62,30 +87,32 @@
       register: opt
 
     #################################################
-    # ✅ SET TARGET HOST
+    # ✅ FINAL HOST VALUE
     #################################################
 
-    - set_fact:
+    - name: Set target host
+      set_fact:
         target_host: "{{ opt.json.result.value }}"
 
     #################################################
-    # ✅ DEBUG HOST
+    # ✅ DEBUG HOST VALUE (YOU WANTED THIS ✅)
     #################################################
 
-    - debug:
-        msg: "TARGET HOST from ServiceNow = {{ target_host }}"
+    - name: Show hostname value from SR
+      debug:
+        msg: "✅ Hostname from ServiceNow = {{ target_host }}"
 
     #################################################
-    # ✅ VALIDATION (VERY IMPORTANT 🔥)
+    # ✅ VALIDATION
     #################################################
 
-    - name: Fail if invalid host
+    - name: Fail if host not in inventory
       fail:
-        msg: "❌ Invalid hostname from ServiceNow → {{ target_host }}"
+        msg: "❌ Invalid host from ServiceNow → {{ target_host }}"
       when: target_host not in groups['all']
 
     #################################################
-    # ✅ ADD HOST (CORRECT WAY)
+    # ✅ ADD HOST WITH REAL CONNECTION
     #################################################
 
     - name: Add host dynamically
@@ -108,12 +135,12 @@
   tasks:
 
     #################################################
-    # ✅ CONFIRM HOST
+    # ✅ CONFIRM EXECUTION HOST
     #################################################
 
     - name: Confirm execution host
       debug:
-        msg: "Running on {{ inventory_hostname }}"
+        msg: "🚀 Running on {{ inventory_hostname }}"
 
     #################################################
     # ✅ CHECK INSTALLATION
@@ -124,8 +151,9 @@
         path: /etc/datadog-agent/datadog.yaml
       register: dd
 
-    - debug:
-        msg: "Already installed = {{ dd.stat.exists }}"
+    - name: Show installation status
+      debug:
+        msg: "Installed = {{ dd.stat.exists }}"
 
     #################################################
     # ✅ CLEAN OLD CONFIG
@@ -134,14 +162,6 @@
     - name: Remove Debian keyring
       file:
         path: /usr/share/keyrings/datadog-archive-keyring.gpg
-        state: absent
-      when:
-        - ansible_os_family == "Debian"
-        - not dd.stat.exists
-
-    - name: Remove Debian repo
-      file:
-        path: /etc/apt/sources.list.d/datadog.list
         state: absent
       when:
         - ansible_os_family == "Debian"
@@ -156,7 +176,7 @@
         - not dd.stat.exists
 
     #################################################
-    # ✅ DOWNLOAD INSTALLER
+    # ✅ DOWNLOAD
     #################################################
 
     - name: Download installer
@@ -164,11 +184,10 @@
         url: https://install.datadoghq.com/scripts/install_script_agent7.sh
         dest: /tmp/datadog_install.sh
         mode: '0755'
-        force: yes
       when: not dd.stat.exists
 
     #################################################
-    # ✅ INSTALL DATADOG
+    # ✅ INSTALL
     #################################################
 
     - name: Install Datadog
@@ -176,10 +195,6 @@
         DD_API_KEY={{ datadog_api_key }} \
         DD_SITE="us5.datadoghq.com" \
         DD_AGENT_MAJOR_VERSION=7 \
-        DD_APM_INSTRUMENTATION_ENABLED=host \
-        DD_DATA_STREAMS_ENABLED=true \
-        DD_PROFILING_ENABLED=auto \
-        DD_LOGS_CONFIG_PROCESS_COLLECT_ALL=true \
         bash /tmp/datadog_install.sh
       args:
         executable: /bin/bash
@@ -204,11 +219,7 @@
       register: dd_status
 
     - debug:
-        msg: "Datadog service = {{ dd_status.stdout }}"
-
-    #################################################
-    # ✅ SUCCESS
-    #################################################
+        msg: "✅ Datadog service = {{ dd_status.stdout }}"
 
     - debug:
-        msg: "✅ Datadog installed successfully on {{ inventory_hostname }}"
+        msg: "✅ Datadog installed on {{ inventory_hostname }}"

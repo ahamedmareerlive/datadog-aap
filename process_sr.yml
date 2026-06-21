@@ -1,10 +1,11 @@
 #################################################
-# ✅ PLAY 1: SERVICENOW → GET HOSTNAME
+# ✅ PLAY 1: SERVICENOW → GET TARGET HOSTNAME
 #################################################
 
 - name: Process ServiceNow SR
   hosts: localhost
   gather_facts: no
+  become: no
 
   vars:
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
@@ -63,12 +64,13 @@
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG (FINAL CLEAN ✅)
+# ✅ PLAY 2: INSTALL DATADOG AGENT
 #################################################
 
 - name: Install Datadog Agent
   hosts: dynamic_targets
   become: yes
+  become_method: su   # ✅ FIX FOR NO SUDO
   gather_facts: yes
 
   tasks:
@@ -83,7 +85,7 @@
       when: datadog_api_key is not defined or datadog_api_key == ""
 
     #################################################
-    # ✅ CHECK IF INSTALLED
+    # ✅ CHECK IF ALREADY INSTALLED
     #################################################
 
     - name: Check Datadog installation
@@ -96,10 +98,10 @@
         msg: "Already installed = {{ dd_installed.stat.exists }}"
 
     #################################################
-    # ✅ CLEAN OLD DATADOG FILES (CRITICAL FIX ✅)
+    # ✅ CLEAN OLD DATADOG FILES (CRITICAL)
     #################################################
 
-    - name: Remove old repo (Debian)
+    - name: Remove old repo
       file:
         path: /etc/apt/sources.list.d/datadog.list
         state: absent
@@ -111,7 +113,7 @@
         state: absent
       when: ansible_os_family == "Debian"
 
-    - name: Remove old install script
+    - name: Remove old script
       file:
         path: /tmp/datadog_install.sh
         state: absent
@@ -120,7 +122,7 @@
     # ✅ DOWNLOAD AGENT 7 SCRIPT
     #################################################
 
-    - name: Download Datadog Agent 7 script
+    - name: Download Datadog Agent 7 installer
       get_url:
         url: https://install.datadoghq.com/scripts/install_script_agent7.sh
         dest: /tmp/datadog_install.sh
@@ -129,10 +131,10 @@
       when: not dd_installed.stat.exists
 
     #################################################
-    # ✅ INSTALL DATADOG (FINAL FIX ✅)
+    # ✅ EXECUTE INSTALL SCRIPT
     #################################################
 
-    - name: Execute Datadog installer
+    - name: Install Datadog Agent
       shell: |
         DD_API_KEY={{ datadog_api_key }} \
         DD_SITE="us5.datadoghq.com" \
@@ -161,6 +163,6 @@
     # ✅ SUCCESS MESSAGE
     #################################################
 
-    - name: Final success
+    - name: Success
       debug:
         msg: "✅ Datadog Agent installed successfully on {{ inventory_hostname }}"

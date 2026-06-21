@@ -5,14 +5,13 @@
 - name: Process ServiceNow SR
   hosts: localhost
   gather_facts: no
-  become: no
 
   vars:
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
 
   tasks:
 
-    - name: Get ServiceNow Request Item
+    - name: Get SR
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=state=1&sysparm_limit=1"
         method: GET
@@ -20,36 +19,32 @@
         password: "{{ snow_password }}"
         force_basic_auth: yes
         return_content: yes
-      register: sn_response
+      register: sn
 
     - set_fact:
-        request_sys_id: "{{ sn_response.json.result[0].sys_id }}"
+        request_sys_id: "{{ sn.json.result[0].sys_id }}"
 
-    - name: Get mtom records
+    - name: Get mtom
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request={{ request_sys_id }}"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
-      register: mtom_response
+      register: mtom
 
     - set_fact:
-        option_sys_id: "{{ mtom_response.json.result[0].sc_item_option.value }}"
+        option_sys_id: "{{ mtom.json.result[0].sc_item_option.value }}"
 
-    - name: Get actual hostname value
+    - name: Get hostname
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
-      register: option_response
+      register: opt
 
     - set_fact:
-        target_host: "{{ option_response.json.result.value }}"
-
-    - fail:
-        msg: "Hostname extraction failed"
-      when: target_host == ""
+        target_host: "{{ opt.json.result.value }}"
 
     - add_host:
         name: "{{ target_host }}"
@@ -57,46 +52,40 @@
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG (FINAL FIX ✅)
+# ✅ PLAY 2: INSTALL DATADOG (FINAL ✅)
 #################################################
 
 - name: Install Datadog Agent
   hosts: dynamic_targets
   gather_facts: yes
-  become: no   # ✅ IMPORTANT
+  become: no
 
   tasks:
 
-    - name: Validate Datadog API key
-      fail:
-        msg: "Datadog API key missing"
-      when: datadog_api_key is not defined or datadog_api_key == ""
-
-    - name: Check Datadog installation
+    - name: Check Datadog installed
       stat:
         path: /etc/datadog-agent/datadog.yaml
-      register: dd_installed
+      register: dd
 
     - debug:
-        msg: "Installed = {{ dd_installed.stat.exists }}"
+        msg: "Installed = {{ dd.stat.exists }}"
 
     #################################################
-    # ✅ DOWNLOAD SCRIPT (OVERWRITE FIX ✅)
+    # ✅ DOWNLOAD SCRIPT (NEW PATH ✅)
     #################################################
 
-    - name: Download Datadog Agent 7 installer
+    - name: Download installer
       get_url:
         url: https://install.datadoghq.com/scripts/install_script_agent7.sh
-        dest: /tmp/datadog_install.sh
+        dest: /home/ubuntu/datadog_install.sh
         mode: '0755'
-        force: yes
-      when: not dd_installed.stat.exists
+      when: not dd.stat.exists
 
     #################################################
     # ✅ INSTALL
     #################################################
 
-    - name: Install Datadog Agent
+    - name: Install Datadog
       shell: |
         DD_API_KEY={{ datadog_api_key }} \
         DD_SITE="us5.datadoghq.com" \
@@ -104,18 +93,17 @@
         DD_APM_INSTRUMENTATION_ENABLED=host \
         DD_DATA_STREAMS_ENABLED=true \
         DD_PROFILING_ENABLED=auto \
-        DD_APM_INSTRUMENTATION_LIBRARIES=java:1,python:4,js:5,php:1,dotnet:3,ruby:2 \
         DD_LOGS_CONFIG_PROCESS_COLLECT_ALL=true \
-        bash /tmp/datadog_install.sh
+        bash /home/ubuntu/datadog_install.sh
       args:
         executable: /bin/bash
-      when: not dd_installed.stat.exists
+      when: not dd.stat.exists
 
     #################################################
-    # ✅ ENSURE SERVICE
+    # ✅ START SERVICE
     #################################################
 
-    - name: Ensure Datadog agent is running
+    - name: Ensure service running
       service:
         name: datadog-agent
         state: started

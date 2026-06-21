@@ -1,5 +1,5 @@
 #################################################
-# ✅ PLAY 1: SERVICENOW → GET HOSTNAME
+# ✅ PLAY 1: SERVICENOW → GET TARGET HOSTNAME
 #################################################
 
 - name: Process ServiceNow SR
@@ -32,7 +32,6 @@
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
-        return_content: yes
       register: mtom_response
 
     - name: Extract option sys_id
@@ -45,16 +44,15 @@
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
-        return_content: yes
       register: option_response
 
-    - name: Set hostname
+    - name: Set target hostname
       set_fact:
         target_host: "{{ option_response.json.result.value }}"
 
     - name: Validate hostname
       fail:
-        msg: "Hostname extraction failed"
+        msg: "❌ Hostname extraction failed"
       when: target_host is not defined or target_host == ""
 
     - name: Add host dynamically
@@ -64,16 +62,13 @@
 
 
 #################################################
-# ✅ PLAY 2: INSTALL DATADOG AGENT (FINAL ✅)
+# ✅ PLAY 2: INSTALL DATADOG (HARDCODED SITE ✅)
 #################################################
 
 - name: Install Datadog Agent
   hosts: dynamic_targets
   become: yes
   gather_facts: yes
-
-  vars:
-    datadog_site: "datadoghq.com"
 
   tasks:
 
@@ -83,60 +78,77 @@
 
     - name: Validate Datadog API key
       fail:
-        msg: "Datadog API key missing"
+        msg: "❌ Datadog API key missing"
       when: datadog_api_key is not defined or datadog_api_key == ""
 
     #################################################
     # ✅ CHECK EXISTING INSTALL
     #################################################
 
-    - name: Check Datadog installed
+    - name: Check Datadog installation
       stat:
         path: /etc/datadog-agent/datadog.yaml
       register: dd_installed
 
-    - name: Debug status
+    - name: Debug install status
       debug:
         msg: "Already installed = {{ dd_installed.stat.exists }}"
 
     #################################################
-    # ✅ DOWNLOAD AGENT 7 SCRIPT ✅
+    # ✅ CLEAN OLD SCRIPT
     #################################################
 
-    - name: Download Datadog Agent 7 install script
-      get_url:
-        url: https://s3.amazonaws.com/dd-agent/scripts/install_script_agent7.sh
-        dest: /tmp/datadog_install.sh
-        mode: '0755'
+    - name: Remove old script
+      file:
+        path: /tmp/datadog_install.sh
+        state: absent
       when: not dd_installed.stat.exists
 
     #################################################
-    # ✅ EXECUTE SCRIPT ✅
+    # ✅ DOWNLOAD AGENT 7 SCRIPT
     #################################################
 
-    - name: Run Datadog Agent 7 install script
+    - name: Download Datadog Agent 7 script
+      get_url:
+        url: https://install.datadoghq.com/scripts/install_script_agent7.sh
+        dest: /tmp/datadog_install.sh
+        mode: '0755'
+        force: yes
+      when: not dd_installed.stat.exists
+
+    #################################################
+    # ✅ EXECUTE SCRIPT (HARDCODED SITE ✅)
+    #################################################
+
+    - name: Execute Datadog installer
       shell: |
         DD_API_KEY={{ datadog_api_key }} \
-        DD_SITE={{ datadog_site }} \
+        DD_SITE="us5.datadoghq.com" \
+        DD_AGENT_MAJOR_VERSION=7 \
+        DD_APM_INSTRUMENTATION_ENABLED=host \
+        DD_DATA_STREAMS_ENABLED=true \
+        DD_PROFILING_ENABLED=auto \
+        DD_APM_INSTRUMENTATION_LIBRARIES=java:1,python:4,js:5,php:1,dotnet:3,ruby:2 \
+        DD_LOGS_CONFIG_PROCESS_COLLECT_ALL=true \
         bash /tmp/datadog_install.sh
       args:
         executable: /bin/bash
       when: not dd_installed.stat.exists
 
     #################################################
-    # ✅ ENSURE SERVICE ✅
+    # ✅ ENSURE SERVICE RUNNING
     #################################################
 
-    - name: Ensure Datadog agent running
+    - name: Ensure Datadog agent is running
       service:
         name: datadog-agent
         state: started
         enabled: yes
 
     #################################################
-    # ✅ SUCCESS ✅
+    # ✅ SUCCESS
     #################################################
 
     - name: Success message
       debug:
-        msg: "✅ Datadog Agent 7 installed successfully on {{ inventory_hostname }}"
+        msg: "✅ Datadog installed successfully on {{ inventory_hostname }}"

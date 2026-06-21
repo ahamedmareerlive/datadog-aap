@@ -1,5 +1,5 @@
 #################################################
-# ✅ PLAY 1: SERVICE NOW → CORRECT VARIABLE EXTRACTION
+# ✅ PLAY 1: SERVICENOW → CORRECT VARIABLE
 #################################################
 
 - name: Get latest ServiceNow SR
@@ -34,7 +34,7 @@
         request_sys_id: "{{ sn.json.result[0].sys_id }}"
 
     #################################################
-    # ✅ GET MTOM RECORDS
+    # ✅ GET VARIABLES
     #################################################
 
     - name: Get mtom
@@ -45,34 +45,47 @@
         password: "{{ snow_password }}"
       register: mtom
 
+    #################################################
+    # ✅ SORT VARIABLES BY DATE ✅
+    #################################################
+
+    - name: Sort mtom by sys_created_on
+      set_fact:
+        sorted_mtom: "{{ mtom.json.result | sort(attribute='sys_created_on') }}"
+
+    #################################################
+    # ✅ PICK LATEST VARIABLE ✅ (CRITICAL FIX)
+    #################################################
+
+    - name: Extract latest variable sys_id
+      set_fact:
+        option_sys_id: "{{ sorted_mtom[-1].sc_item_option.value }}"
+
+    #################################################
+    # ✅ DEBUG SELECTED SYS_ID
+    #################################################
+
     - debug:
-        var: mtom.json.result
+        msg: "✅ Selected option sys_id = {{ option_sys_id }}"
 
     #################################################
-    # ✅ LOOP AND FIND VARIABLE NAME = target ✅
+    # ✅ GET FINAL VALUE
     #################################################
 
-    - name: Find correct variable (name=target)
+    - name: Get hostname value
       uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ item.sc_item_option.value }}"
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
-      loop: "{{ mtom.json.result }}"
-      register: option_details
+      register: opt
 
-    #################################################
-    # ✅ PICK CORRECT VALUE
-    #################################################
-
-    - name: Extract correct hostname
+    - name: Set target host
       set_fact:
-        target_host: "{{ item.json.result.value }}"
-      loop: "{{ option_details.results }}"
-      when: item.json.result.name == "target"
+        target_host: "{{ opt.json.result.value }}"
 
     #################################################
-    # ✅ DEBUG FINAL HOST ✅
+    # ✅ FINAL DEBUG ✅
     #################################################
 
     - debug:
@@ -82,7 +95,7 @@
     # ✅ VALIDATION
     #################################################
 
-    - name: Validate host
+    - name: Validate host exists
       fail:
         msg: "❌ Invalid host: {{ target_host }}"
       when: target_host not in groups['all']
@@ -118,15 +131,13 @@
     - debug:
         msg: "Installed = {{ dd.stat.exists }}"
 
-    - name: Download installer
-      get_url:
+    - get_url:
         url: https://install.datadoghq.com/scripts/install_script_agent7.sh
         dest: /tmp/datadog_install.sh
         mode: '0755'
       when: not dd.stat.exists
 
-    - name: Install agent
-      shell: |
+    - shell: |
         DD_API_KEY={{ datadog_api_key }} \
         DD_SITE="us5.datadoghq.com" \
         bash /tmp/datadog_install.sh
@@ -141,4 +152,4 @@
       register: status
 
     - debug:
-        msg: "✅ Datadog = {{ status.stdout }}"
+        msg: "✅ Datadog service = {{ status.stdout }}"

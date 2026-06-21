@@ -7,7 +7,7 @@
   gather_facts: no
 
   vars:
-    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
+    servicenow_instance: "://service-now.com"
     search_text: "Datadog"
 
   tasks:
@@ -135,19 +135,14 @@
             update_cache: yes
 
         #################################################
-        # ✅ ADD DATADOG KEY (DEARMOR METHOD)
+        # ✅ ADD DATADOG KEY (DIRECT KEYRING DOWNLOAD)
         #################################################
 
-        # Note: DATADOG_APT_KEY_C0962C7D.public is the primary modern repo signing key
-        - name: Download Datadog GPG key
+        - name: Download pre-dearmored Datadog keyring file directly
           get_url:
             url: https://datadoghq.com
-            dest: /tmp/datadog_key.public
+            dest: /usr/share/keyrings/datadog-archive-keyring.gpg
             mode: '0644'
-
-        - name: Dearmor Datadog GPG key to keyring
-          command: gpg --yes --dearmor -o /usr/share/keyrings/datadog-archive-keyring.gpg /tmp/datadog_key.public
-          changed_when: true
 
         #################################################
         # ✅ ADD REPO
@@ -157,7 +152,7 @@
           copy:
             dest: /etc/apt/sources.list.d/datadog.list
             content: |
-              deb [signed-by=/usr/share/keyrings/datadog-archive-keyring.gpg] https://apt.datadoghq.com/ stable 7
+              deb [signed-by=/usr/share/keyrings/datadog-archive-keyring.gpg] https://datadoghq.com stable 7
             mode: '0644'
 
         #################################################
@@ -191,7 +186,7 @@
           lineinfile:
             path: /etc/datadog-agent/datadog.yaml
             regexp: "^site:"
-            line: "site: us5.datadoghq.com"
+            line: "site: ://datadoghq.com"
 
         #################################################
         # ✅ START SERVICE
@@ -223,9 +218,8 @@
   gather_facts: no
 
   vars:
-    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
-    # Safely extract execution results across play bounds
-    execution_host: "{{ groups['dynamic_targets'][0] | default('') }}"
+    servicenow_instance: "://service-now.com"
+    execution_host: "{{ groups['dynamic_targets'] | default('') }}"
     was_successful: "{{ hostvars[execution_host]['install_success'] | default(false) if execution_host else false }}"
 
   tasks:

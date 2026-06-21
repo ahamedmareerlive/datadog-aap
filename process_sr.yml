@@ -1,20 +1,24 @@
 #################################################
-# ✅ PLAY 1: READ SERVICENOW (NO SUDO)
+# ✅ PLAY 1: DEBUG SERVICENOW RESPONSE
 #################################################
 
-- name: Process ServiceNow SR
+- name: Debug ServiceNow SR
   hosts: localhost
   gather_facts: no
-  become: no        # ✅ IMPORTANT FIX
+  become: no
 
   vars:
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
 
   tasks:
 
+    #################################################
+    # ✅ STEP 1: GET SR
+    #################################################
+
     - name: Get ServiceNow Request Item
       uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=state=1"
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=state=1&sysparm_limit=1&sysparm_display_value=true"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
@@ -24,92 +28,92 @@
           Accept: "application/json"
       register: sn_response
 
-    - name: Extract target hostname
-      set_fact:
-        target_host: "{{ sn_response.json.result[0].variables.target }}"
+    #################################################
+    # ✅ STEP 2: PRINT FULL RESPONSE
+    #################################################
 
-    - name: Fail if target missing
+    - name: Show FULL ServiceNow response
+      debug:
+        var: sn_response.json
+
+    #################################################
+    # ✅ STEP 3: PRINT FIRST RECORD
+    #################################################
+
+    - name: Show first request object
+      debug:
+        var: sn_response.json.result[0]
+
+    #################################################
+    # ✅ STEP 4: TRY TO SHOW VARIABLES FIELD
+    #################################################
+
+    - name: Show variables if exist
+      debug:
+        var: sn_response.json.result[0].variables
+      ignore_errors: yes
+
+    #################################################
+    # ✅ STEP 5: TRY MULTIPLE EXTRACTIONS
+    #################################################
+
+    - name: Try extraction (variables.target)
+      debug:
+        msg: "{{ sn_response.json.result[0].variables.target }}"
+      ignore_errors: yes
+
+    - name: Try extraction (u_target)
+      debug:
+        msg: "{{ sn_response.json.result[0].u_target }}"
+      ignore_errors: yes
+
+    - name: Try extraction (description)
+      debug:
+        msg: "{{ sn_response.json.result[0].description }}"
+      ignore_errors: yes
+
+    #################################################
+    # ✅ STEP 6: FINAL SAFE EXTRACTION
+    #################################################
+
+    - name: Extract target hostname (robust logic)
+      set_fact:
+        target_host: >-
+          {{
+            sn_response.json.result[0].variables.target
+              if ('variables' in sn_response.json.result[0] and
+                  'target' in sn_response.json.result[0].variables)
+            else
+              (
+                sn_response.json.result[0].u_target
+                if ('u_target' in sn_response.json.result[0])
+                else
+                  (sn_response.json.result[0].description | default('') | regex_search('(?:target|hostname):\\s*(\\S+)', '\\1'))
+              )
+          }}
+
+    #################################################
+    # ✅ STEP 7: SHOW FINAL RESULT
+    #################################################
+
+    - name: Final extracted target
+      debug:
+        msg: "Final Target = {{ target_host }}"
+
+    #################################################
+    # ✅ STEP 8: VALIDATE
+    #################################################
+
+    - name: Fail if target not found
       fail:
-        msg: "Target hostname not found"
+        msg: "Target hostname not found in ServiceNow response"
       when: target_host is not defined or target_host == ""
+
+    #################################################
+    # ✅ STEP 9: ADD HOST (FOR NEXT STEP)
+    #################################################
 
     - name: Add host dynamically
       add_host:
         name: "{{ target_host }}"
         groups: dynamic_targets
-
-
-#################################################
-# ✅ PLAY 2: INSTALL DATADOG (WITH SUDO)
-#################################################
-
-- name: Install Datadog Agent
-  hosts: dynamic_targets
-  become: yes       # ✅ Only here
-  gather_facts: yes
-
-  vars:
-    datadog_site: "datadoghq.com"
-
-  tasks:
-
-    - name: Check API key
-      fail:
-        msg: "Datadog API key missing"
-      when: datadog_api_key is not defined or datadog_api_key == ""
-
-    - name: Check if installed
-      stat:
-        path: /etc/datadog-agent/datadog.yaml
-      register: dd_installed
-
-    - name: Add Datadog APT key
-      apt_key:
-        url: https://keys.datadoghq.com/DATADOG_APT_KEY.public
-      when:
-        - ansible_os_family == "Debian"
-        - not dd_installed.stat.exists
-
-    - name: Add Datadog repo (Debian)
-      apt_repository:
-        repo: "deb https://apt.datadoghq.com/ stable 7"
-      when:
-        - ansible_os_family == "Debian"
-        - not dd_installed.stat.exists
-
-    - name: Install Datadog (Debian)
-      apt:
-        name: datadog-agent
-        state: present
-        update_cache: yes
-      when:
-        - ansible_os_family == "Debian"
-        - not dd_installed.stat.exists
-
-    - name: Add Datadog repo (RHEL)
-      yum_repository:
-        name: datadog
-        baseurl: https://yum.datadoghq.com/stable/7/x86_64/
-        gpgkey: https://keys.datadoghq.com/DATADOG_RPM_KEY.public
-      when:
-        - ansible_os_family == "RedHat"
-        - not dd_installed.stat.exists
-
-    - name: Install Datadog (RHEL)
-      yum:
-        name: datadog-agent
-      when:
-        - ansible_os_family == "RedHat"
-        - not dd_installed.stat.exists
-
-    - name: Set API key
-      lineinfile:
-        path: /etc/datadog-agent/datadog.yaml
-        regexp: '^api_key:'
-        line: "api_key: {{ datadog_api_key }}"
-
-    - name: Start Datadog service
-      service:
-        name: datadog-agent
-        state: started
-        enabled: yes

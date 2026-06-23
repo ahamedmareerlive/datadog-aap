@@ -87,6 +87,7 @@
             global_failed: true
             error_message: "{{ ansible_failed_result.msg | default('Play1 failure') }}"
 
+
 #################################################
 # PLAY 2: INSTALL DATADOG
 #################################################
@@ -146,6 +147,7 @@
                 | default('Installation failure')
               }}
 
+
 #################################################
 # PLAY 3: VERIFY DATADOG
 #################################################
@@ -185,6 +187,7 @@
             datadog_ok: false
             error_message: "Datadog API failure"
 
+
 #################################################
 # PLAY 4: SUCCESS HANDLING
 #################################################
@@ -218,6 +221,7 @@
         body:
           state: "3"
 
+
 #################################################
 # PLAY 5: FAILURE HANDLING + INCIDENT
 #################################################
@@ -240,6 +244,7 @@
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
         body_format: json
+        status_code: [200, 201]   # ✅ CRITICAL FIX
         body:
           short_description: "Datadog Installation Failed"
           description: |

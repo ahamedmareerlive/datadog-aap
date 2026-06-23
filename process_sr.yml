@@ -1,33 +1,116 @@
 ---
 #################################################
-# PLAY 1: GET INSTANCE
+# PLAY 1: GET SERVICE NOW + EC2 INSTANCE
 #################################################
 
-- name: Get Target Host
+- name: Get details from ServiceNow and AWS
   hosts: localhost
   gather_facts: no
 
   vars:
+    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
     aws_region: "ap-south-1"
 
   tasks:
 
-    - name: Get EC2 info
+    - set_fact:
+        datadog_ok: false
+        global_failed: false
+
+    #################################################
+    # ✅ GET SR
+    #################################################
+
+    - name: Get SR
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_limit=1"
+        method: GET
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+      register: sn
+
+    - debug:
+        var: sn.json.result
+
+    - set_fact:
+        request_item_sys_id: "{{ sn.json.result[0].sys_id }}"
+
+    #################################################
+    # ✅ GET VARIABLES
+    #################################################
+
+    - name: Get variables (MTOM)
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?request={{ request_item_sys_id }}"
+        method: GET
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+      register: mtom
+
+    - debug:
+        var: mtom.json.result
+
+    - set_fact:
+        option_sys_id: "{{ mtom.json.result[-1].sc_item_option.value }}"
+
+    #################################################
+    # ✅ GET TARGET HOST
+    #################################################
+
+    - name: Get ServiceNow variable value
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
+        method: GET
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+      register: opt
+
+    - name: DEBUG ServiceNow raw value
+      debug:
+        var: opt.json
+
+    - name: Extract target host
+      set_fact:
+        target_host: "{{ opt.json.result.value }}"
+
+    - name: Confirm target host
+      debug:
+        msg:
+          - "✅ Extracted target_host: {{ target_host }}"
+
+    #################################################
+    # ✅ AWS LOOKUP (FIXED ✅)
+    #################################################
+
+    - name: Get EC2 instance using Name tag
       amazon.aws.ec2_instance_info:
         region: "{{ aws_region }}"
+        filters:
+          "tag:Name": "{{ target_host }}"
       register: ec2_info
+
+    - name: DEBUG EC2 result
+      debug:
+        var: ec2_info.instances
+
+    - name: Ensure instance found
+      fail:
+        msg: "❌ No EC2 instance found for {{ target_host }}"
+      when: ec2_info.instances | length == 0
 
     - name: Set instance details
       set_fact:
         datadog_host: "{{ ec2_info.instances[0].instance_id }}"
         target_ip: "{{ ec2_info.instances[0].public_ip_address }}"
 
-    - debug:
+    - name: Confirm correct instance
+      debug:
         msg:
-          - "Instance ID: {{ datadog_host }}"
-          - "Public IP: {{ target_ip }}"
+          - "✅ Instance ID: {{ datadog_host }}"
+          - "✅ Public IP: {{ target_ip }}"
 
-    - add_host:
+    - name: Add dynamic host
+      add_host:
         name: dynamic_target
         ansible_host: "{{ target_ip }}"
         ansible_user: ubuntu
@@ -35,7 +118,7 @@
 
 
 #################################################
-# PLAY 2: PRE-CHECK
+# PLAY 2: DATADOG PRE-CHECK
 #################################################
 
 - name: Datadog Pre-check
@@ -54,7 +137,7 @@
       register: dd_check
       failed_when: false
 
-    - name: Extract instance IDs
+    - name: Extract instance IDs from Datadog
       set_fact:
         dd_instances: >-
           {{
@@ -66,19 +149,19 @@
 
     - debug:
         msg:
-          - "Datadog instances: {{ dd_instances }}"
-          - "Target instance: {{ datadog_host }}"
+          - "📦 Datadog instances: {{ dd_instances }}"
+          - "🎯 Target instance: {{ datadog_host }}"
 
-    - name: Check if already present
+    - name: Check if already reporting
       set_fact:
         datadog_ok: "{{ datadog_host in dd_instances }}"
 
     - debug:
-        msg: "Pre-check result: {{ datadog_ok }}"
+        msg: "✅ Pre-check result: {{ datadog_ok }}"
 
 
 #################################################
-# PLAY 3: INSTALL
+# PLAY 3: INSTALL DATADOG
 #################################################
 
 - name: Install Datadog
@@ -89,7 +172,7 @@
   tasks:
 
     - debug:
-        msg: "Install needed: {{ not hostvars['localhost'].datadog_ok }}"
+        msg: "Install required: {{ not hostvars['localhost'].datadog_ok }}"
 
     - meta: end_play
       when: hostvars['localhost'].datadog_ok
@@ -124,7 +207,7 @@
 
 
 #################################################
-# PLAY 4: VERIFY (SAFE LOOP)
+# PLAY 4: VERIFY
 #################################################
 
 - name: Verify Datadog
@@ -137,12 +220,12 @@
       when: datadog_ok
 
     - debug:
-        msg: "Waiting 120 seconds for Datadog ingestion..."
+        msg: "⏳ Waiting 120 seconds for Datadog ingestion..."
 
     - pause:
         seconds: 120
 
-    - name: Retry API calls (simple)
+    - name: Call Datadog API again
       uri:
         url: "https://api.us5.datadoghq.com/api/v1/hosts"
         method: GET
@@ -155,7 +238,7 @@
       until: dd_api.status == 200
       failed_when: false
 
-    - name: Extract instances again
+    - name: Extract instance list again
       set_fact:
         dd_instances: >-
           {{
@@ -167,12 +250,11 @@
 
     - debug:
         msg:
-          - "After install Datadog instances: {{ dd_instances }}"
-          - "Target instance: {{ datadog_host }}"
+          - "📦 After install Datadog instances: {{ dd_instances }}"
+          - "🎯 Target instance: {{ datadog_host }}"
 
-    - name: Final evaluation
-      set_fact:
+    - set_fact:
         datadog_ok: "{{ datadog_host in dd_instances }}"
 
     - debug:
-        msg: "Final result: {{ datadog_ok }}"
+        msg: "✅ FINAL RESULT: {{ datadog_ok }}"

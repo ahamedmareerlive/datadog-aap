@@ -1,6 +1,6 @@
 ---
 #################################################
-# ✅ PLAY 1: GET SR + TARGET HOST
+# PLAY 1: GET SR + TARGET HOST
 #################################################
 
 - name: Get SR and prepare execution
@@ -13,163 +13,154 @@
 
   tasks:
 
-    - name: Get latest SR
-      uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=short_descriptionLIKE{{ search_text }}^active=true^stateIN1,2&sysparm_order_by_desc=sys_created_on&sysparm_limit=1"
-        method: GET
-        user: "{{ snow_user }}"
-        password: "{{ snow_password }}"
-        force_basic_auth: yes
-      register: sn
-
-    - name: Validate SR exists
-      fail:
-        msg: "❌ No ServiceNow SR found"
-      when: sn.json.result | length == 0
-
-    - name: Extract IDs
+    - name: Init flags
       set_fact:
-        request_item_sys_id: "{{ sn.json.result[0].sys_id }}"
-        request_sys_id: "{{ sn.json.result[0].request.value }}"
+        datadog_ok: true
+        global_failed: false
+        error_message: ""
 
-    - name: Set RITM In Progress
-      uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
-        method: PATCH
-        user: "{{ snow_user }}"
-        password: "{{ snow_password }}"
-        body_format: json
-        body:
-          state: "2"
-          work_notes: "🚀 Datadog installation started via AAP"
+    - block:
 
-    #################################################
-    # ✅ GET HOSTNAME FROM SR
-    #################################################
+        - name: Get latest SR
+          uri:
+            url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=short_descriptionLIKE{{ search_text }}^active=true^stateIN1,2&sysparm_order_by_desc=sys_created_on&sysparm_limit=1"
+            method: GET
+            user: "{{ snow_user }}"
+            password: "{{ snow_password }}"
+            force_basic_auth: yes
+          register: sn
 
-    - name: Get SR variables
-      uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request={{ request_item_sys_id }}"
-        method: GET
-        user: "{{ snow_user }}"
-        password: "{{ snow_password }}"
-      register: mtom
+        - name: Validate SR exists
+          fail:
+            msg: "No SR found"
+          when: sn.json.result | length == 0
 
-    - name: Extract latest variable
-      set_fact:
-        option_sys_id: "{{ (mtom.json.result | sort(attribute='sys_created_on'))[-1].sc_item_option.value }}"
+        - name: Extract IDs
+          set_fact:
+            request_item_sys_id: "{{ sn.json.result[0].sys_id }}"
+            request_sys_id: "{{ sn.json.result[0].request.value }}"
 
-    - name: Get host value
-      uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
-        method: GET
-        user: "{{ snow_user }}"
-        password: "{{ snow_password }}"
-      register: opt
+        - name: Set RITM In Progress
+          uri:
+            url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
+            method: PATCH
+            user: "{{ snow_user }}"
+            password: "{{ snow_password }}"
+            body_format: json
+            body:
+              state: "2"
+              work_notes: "🚀 Datadog installation started"
 
-    - name: Set target host
-      set_fact:
-        target_host: "{{ opt.json.result.value }}"
+        - name: Get SR variables
+          uri:
+            url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request={{ request_item_sys_id }}"
+            method: GET
+            user: "{{ snow_user }}"
+            password: "{{ snow_password }}"
+          register: mtom
 
-    - name: Add dynamic host
-      add_host:
-        name: "{{ target_host }}"
-        groups: dynamic_targets
-        ansible_host: "{{ hostvars[target_host].ansible_host }}"
+        - name: Extract variable sys_id
+          set_fact:
+            option_sys_id: "{{ (mtom.json.result | sort(attribute='sys_created_on'))[-1].sc_item_option.value }}"
 
+        - name: Get host value
+          uri:
+            url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
+            method: GET
+            user: "{{ snow_user }}"
+            password: "{{ snow_password }}"
+          register: opt
+
+        - name: Set target host
+          set_fact:
+            target_host: "{{ opt.json.result.value }}"
+
+        - name: Add host
+          add_host:
+            name: "{{ target_host }}"
+            groups: dynamic_targets
+
+      rescue:
+
+        - name: Capture error
+          set_fact:
+            global_failed: true
+            error_message: >-
+              {{ ansible_failed_result.msg | default('Play1 failure') }}
+
+---
 
 #################################################
-# ✅ PLAY 2: INSTALL + CONFIGURE DATADOG
+# PLAY 2: INSTALL DATADOG (SAFE)
 #################################################
 
 - name: Install Datadog Agent
   hosts: dynamic_targets
   become: yes
   gather_facts: yes
+  ignore_unreachable: yes
 
   tasks:
 
-    - debug:
-        msg: "🚀 Running on {{ inventory_hostname }}"
-
-    #################################################
-    # ✅ CHECK IF INSTALLED
-    #################################################
-
-    - name: Check Datadog installed
-      stat:
-        path: /etc/datadog-agent/datadog.yaml
-      register: dd_installed
-
-    #################################################
-    # ✅ INSTALL ONLY IF NOT INSTALLED
-    #################################################
-
     - block:
 
-        - name: Clean old apt cache
-          shell: |
-            rm -rf /var/lib/apt/lists/*
-            apt-get clean
+        - name: Check Datadog installed
+          stat:
+            path: /etc/datadog-agent/datadog.yaml
+          register: dd_installed
 
-        - name: Update apt
-          apt:
-            update_cache: yes
+        - block:
 
-        - name: Install dependencies
-          apt:
-            name:
-              - curl
-              - apt-transport-https
-            state: present
+            - name: Install dependencies & repo
+              shell: |
+                set -e
+                apt-get clean
+                rm -rf /var/lib/apt/lists/*
+                apt-get update -y
+                apt-get install -y curl apt-transport-https
+                curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public | gpg --dearmor -o /usr/share/keyrings/datadog-archive-keyring.gpg
+                echo "deb [signed-by=/usr/share/keyrings/datadog-archive-keyring.gpg] https://apt.datadoghq.com/ stable 7" > /etc/apt/sources.list.d/datadog.list
+                apt-get update -y
+                apt-get install -y datadog-agent
+              register: install_output
 
-        - name: Add Datadog key
-          shell: |
-            curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public \
-            | gpg --dearmor -o /usr/share/keyrings/datadog-archive-keyring.gpg
+          when: not dd_installed.stat.exists
 
-        - name: Add Datadog repo
-          copy:
-            dest: /etc/apt/sources.list.d/datadog.list
-            content: |
-              deb [signed-by=/usr/share/keyrings/datadog-archive-keyring.gpg] https://apt.datadoghq.com/ stable 7
+        - name: Configure Datadog
+          blockinfile:
+            path: /etc/datadog-agent/datadog.yaml
+            block: |
+              api_key: {{ datadog_api_key }}
+              site: us5.datadoghq.com
+            create: yes
 
-        - name: Update apt again
-          apt:
-            update_cache: yes
-
-        - name: Install datadog agent
-          apt:
+        - name: Restart Datadog
+          service:
             name: datadog-agent
-            state: present
+            state: restarted
+            enabled: yes
 
-      when: not dd_installed.stat.exists
+    rescue:
 
-    #################################################
-    # ✅ CONFIGURE (FIXED ✅)
-    #################################################
+        - name: Capture install failure
+          set_fact:
+            datadog_ok: false
+            global_failed: true
+            error_message: >-
+              {{
+                ansible_failed_result.msg
+                | default(ansible_failed_result.stderr, true)
+                | default('Install failure')
+              }}
 
-    - name: Configure Datadog
-      blockinfile:
-        path: /etc/datadog-agent/datadog.yaml
-        block: |
-          api_key: {{ datadog_api_key }}
-          site: us5.datadoghq.com
-        create: yes
+        - name: Fail safely
+          debug:
+            msg: "Installation failed but continuing workflow"
 
-    #################################################
-    # ✅ START SERVICE
-    #################################################
-
-    - name: Restart Datadog
-      service:
-        name: datadog-agent
-        state: restarted
-        enabled: yes
-
+---
 
 #################################################
-# ✅ PLAY 3: VERIFY WITH DATADOG API
+# PLAY 3: VERIFY DATADOG
 #################################################
 
 - name: Verify Datadog Host
@@ -178,40 +169,45 @@
 
   tasks:
 
-    - name: Check host in Datadog
-      uri:
-        url: "https://api.us5.datadoghq.com/api/v1/hosts?filter={{ target_host }}"
-        method: GET
-        headers:
-          DD-API-KEY: "{{ datadog_api_key }}"
-          DD-APPLICATION-KEY: "{{ datadog_app_key }}"
-        return_content: yes
-      register: dd_api
+    - block:
 
-    - name: Set result
-      set_fact:
-        datadog_ok: "{{ dd_api.json.host_list | length > 0 }}"
+        - name: Check host in Datadog
+          uri:
+            url: "https://api.us5.datadoghq.com/api/v1/hosts?filter={{ target_host | default('unknown') }}"
+            method: GET
+            headers:
+              DD-API-KEY: "{{ datadog_api_key }}"
+              DD-APPLICATION-KEY: "{{ datadog_app_key }}"
+          register: dd_api
 
-    - debug:
-        msg: "Datadog verification = {{ datadog_ok }}"
+        - name: Set result
+          set_fact:
+            datadog_ok: "{{ (dd_api.json.host_list | default([])) | length > 0 }}"
 
+        - name: Mark failure if not found
+          set_fact:
+            global_failed: true
+            error_message: "Host not reporting in Datadog"
+          when: not datadog_ok
+
+      rescue:
+
+        - set_fact:
+            global_failed: true
+            datadog_ok: false
+            error_message: "Datadog API failure"
+
+---
 
 #################################################
-# ✅ PLAY 4: UPDATE SERVICENOW
+# PLAY 4: SUCCESS HANDLING
 #################################################
 
-- name: Update ServiceNow
+- name: Update ServiceNow Success
   hosts: localhost
   gather_facts: no
 
-  vars:
-    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
-
   tasks:
-
-    #################################################
-    # ✅ SUCCESS
-    #################################################
 
     - name: Close RITM
       uri:
@@ -222,8 +218,8 @@
         body_format: json
         body:
           state: "3"
-          work_notes: "✅ Datadog installed and verified successfully"
-      when: datadog_ok
+          work_notes: "✅ Datadog installed successfully"
+      when: not global_failed
 
     - name: Close Request
       uri:
@@ -234,11 +230,57 @@
         body_format: json
         body:
           state: "3"
-      when: datadog_ok
+      when: not global_failed
 
-    #################################################
-    # ❌ FAILURE
-    #################################################
+---
+
+#################################################
+# PLAY 5: FAILURE HANDLING + INCIDENT
+#################################################
+
+- name: Handle Failure
+  hosts: localhost
+  gather_facts: no
+
+  vars:
+    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
+
+  tasks:
+
+    - name: Get Help Desk group sys_id
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sys_user_group?sysparm_query=name=Help Desk"
+        method: GET
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+      register: group_data
+      failed_when: false
+
+    - name: Set group id
+      set_fact:
+        helpdesk_group_id: "{{ group_data.json.result[0].sys_id | default('') }}"
+
+    - name: Create Incident
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/incident"
+        method: POST
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        body_format: json
+        body:
+          short_description: "Datadog Installation Failed"
+          description: |
+            Automation Failure
+
+            Host: {{ target_host | default('unknown') }}
+            RITM: {{ request_item_sys_id | default('unknown') }}
+
+            ERROR:
+            {{ error_message }}
+          assignment_group: "{{ helpdesk_group_id }}"
+          urgency: "2"
+          impact: "2"
+      when: global_failed or not datadog_ok
 
     - name: Set RITM Pending
       uri:
@@ -249,5 +291,6 @@
         body_format: json
         body:
           state: "-5"
-          work_notes: "❌ Datadog not reporting in Datadog API"
-      when: not datadog_ok
+          work_notes: "❌ Failed: {{ error_message }}"
+      when: global_failed or not datadog_ok
+

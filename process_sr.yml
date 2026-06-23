@@ -37,10 +37,10 @@
         request_sys_id: "{{ sn.json.result[0].request.value }}"
 
     #################################################
-    # GET HOST FROM RITM
+    # ✅ GET HOST VALUE
     #################################################
 
-    - name: Get variable mapping
+    - name: Get MTOM mapping
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request_item={{ request_item_sys_id }}"
         method: GET
@@ -48,7 +48,7 @@
         password: "{{ snow_password }}"
       register: mtom
 
-    - name: Get values
+    - name: Get variable values
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ item.sc_item_option.value }}"
         method: GET
@@ -68,7 +68,7 @@
           }}
 
     #################################################
-    # AWS LOOKUP
+    # ✅ AWS LOOKUP + TAG BASED USER
     #################################################
 
     - block:
@@ -92,15 +92,21 @@
             msg: "No EC2 found"
           when: matched_instances | length == 0
 
-        - set_fact:
+        - name: Set instance details
+          set_fact:
             datadog_host: "{{ matched_instances[0].instance_id }}"
             target_ip: "{{ matched_instances[0].public_ip_address }}"
+            ec2_os: "{{ matched_instances[0].tags.OS | default('amzn') | lower }}"
+
+        - name: Set ansible user (TAG BASED ✅)
+          set_fact:
+            dynamic_user: "{{ 'ubuntu' if ec2_os == 'ubuntu' else 'ec2-user' }}"
 
         - name: Add dynamic host
           add_host:
             name: dynamic_target
             ansible_host: "{{ target_ip }}"
-            ansible_user: ubuntu
+            ansible_user: "{{ dynamic_user }}"
             groups: dynamic_targets
 
       rescue:
@@ -110,7 +116,7 @@
 
 
 #################################################
-# PLAY 2: DATADOG PRECHECK
+# PLAY 2: DATADOG PRE-CHECK
 #################################################
 
 - name: Datadog Pre-check
@@ -129,34 +135,12 @@
       register: dd_check
       failed_when: false
 
-    #################################################
-    # ✅ CHECK INSTANCE-ID OR HOSTNAME
-    #################################################
-
     - set_fact:
-        datadog_ok: >-
-          {{
-            (
-              datadog_host in (
-                dd_check.json.host_list | default([])
-                | selectattr('meta.aws.instance-id', 'defined')
-                | map(attribute='meta.aws.instance-id')
-                | list
-              )
-            )
-            or
-            (
-              datadog_host in (
-                dd_check.json.host_list | default([])
-                | map(attribute='host_name')
-                | list
-              )
-            )
-          }}
+        datadog_ok: "{{ datadog_host in (dd_check.json.host_list | map(attribute='host_name') | list) }}"
 
 
 #################################################
-# PLAY 3: INSTALL
+# PLAY 3: INSTALL DATADOG (ALL LINUX ✅)
 #################################################
 
 - name: Install Datadog
@@ -169,15 +153,42 @@
     - meta: end_play
       when: hostvars['localhost'].datadog_ok or hostvars['localhost'].global_failed
 
-    - name: Install agent
+    - name: Install Datadog agent (Universal)
       shell: |
         set -e
-        apt-get update -y
-        apt-get install -y curl apt-transport-https
-        curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public | gpg --dearmor -o /usr/share/keyrings/datadog.gpg
-        echo "deb [signed-by=/usr/share/keyrings/datadog.gpg] https://apt.datadoghq.com/ stable 7" > /etc/apt/sources.list.d/datadog.list
-        apt-get update -y
-        apt-get install -y datadog-agent
+
+        if [ -f /etc/os-release ]; then
+          . /etc/os-release
+        fi
+
+        echo "Detected OS: $ID"
+
+        if [[ "$ID" == "ubuntu" || "$ID" == "debian" ]]; then
+          apt-get update -y
+          apt-get install -y curl apt-transport-https
+          curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public | \
+          gpg --dearmor -o /usr/share/keyrings/datadog.gpg
+          echo "deb [signed-by=/usr/share/keyrings/datadog.gpg] https://apt.datadoghq.com/ stable 7" > \
+          /etc/apt/sources.list.d/datadog.list
+          apt-get update -y
+          apt-get install -y datadog-agent
+
+        elif [[ "$ID" == "amzn" || "$ID" == "rhel" || "$ID" == "centos" || "$ID" == "almalinux" || "$ID" == "rocky" ]]; then
+          yum install -y curl
+          cat <<EOF > /etc/yum.repos.d/datadog.repo
+[datadog]
+name=Datadog
+baseurl=https://yum.datadoghq.com/stable/7/x86_64/
+enabled=1
+gpgcheck=1
+gpgkey=https://keys.datadoghq.com/DATADOG_RPM_KEY_CURRENT.public
+EOF
+          yum install -y datadog-agent
+
+        else
+          echo "Unsupported OS"
+          exit 1
+        fi
 
     - name: Ensure config exists
       command: cp /etc/datadog-agent/datadog.yaml.example /etc/datadog-agent/datadog.yaml
@@ -190,7 +201,6 @@
         block: |
           api_key: {{ datadog_api_key }}
           site: us5.datadoghq.com
-          dd_url: https://app.us5.datadoghq.com
 
     - name: Restart agent
       service:
@@ -199,7 +209,7 @@
 
 
 #################################################
-# PLAY 4: VERIFY (FINAL FIX ✅)
+# PLAY 4: VERIFY (FIXED ✅)
 #################################################
 
 - name: Verify Datadog
@@ -214,7 +224,7 @@
     - pause:
         seconds: 180
 
-    - name: Retry until appears
+    - name: Retry until appears in Datadog
       uri:
         url: "https://api.us5.datadoghq.com/api/v1/hosts"
         method: GET
@@ -224,51 +234,17 @@
       register: dd_api
       retries: 12
       delay: 30
-      until: >
-        (
-          datadog_host in (
-            dd_api.json.host_list | default([])
-            | selectattr('meta.aws.instance-id', 'defined')
-            | map(attribute='meta.aws.instance-id')
-            | list
-          )
-        )
-        or
-        (
-          datadog_host in (
-            dd_api.json.host_list | default([])
-            | map(attribute='host_name')
-            | list
-          )
-        )
+      until: datadog_host in (dd_api.json.host_list | map(attribute='host_name') | list)
       failed_when: false
 
     - set_fact:
-        datadog_ok: >-
-          {{
-            (
-              datadog_host in (
-                dd_api.json.host_list | default([])
-                | selectattr('meta.aws.instance-id', 'defined')
-                | map(attribute='meta.aws.instance-id')
-                | list
-              )
-            )
-            or
-            (
-              datadog_host in (
-                dd_api.json.host_list | default([])
-                | map(attribute='host_name')
-                | list
-              )
-            )
-          }}
+        datadog_ok: "{{ datadog_host in (dd_api.json.host_list | map(attribute='host_name') | list) }}"
 
     - name: Mark failure
       when: not datadog_ok
       set_fact:
         global_failed: true
-        error_message: "Datadog not reporting after retries"
+        error_message: "Datadog not reporting"
 
 
 #################################################
@@ -295,7 +271,7 @@
         body_format: json
         body:
           state: "3"
-          work_notes: "Datadog installed and verified"
+          work_notes: "Datadog installed successfully"
 
     - name: Close Request
       when: datadog_ok and not global_failed
@@ -308,7 +284,7 @@
         body:
           state: "3"
 
-    - name: Failure update
+    - name: Update failure
       when: global_failed or not datadog_ok
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
@@ -328,7 +304,7 @@
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
         body_format: json
-        status_code: [200, 201]
+        status_code: [200,201]
         body:
           short_description: "Datadog automation failed"
           description: "{{ error_message }}"

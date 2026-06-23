@@ -244,7 +244,7 @@
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
         body_format: json
-        status_code: [200, 201]   # ✅ CRITICAL FIX
+        status_code: [200, 201]
         body:
           short_description: "Datadog Installation Failed"
           description: |
@@ -255,7 +255,8 @@
 
             ERROR:
             {{ error_message }}
-          assignment_group: "{{ helpdesk_group_id }}"
+          assignment_group:
+            value: "{{ helpdesk_group_id }}"
           urgency: "2"
           impact: "2"
 
@@ -270,3 +271,4 @@
         body:
           state: "-5"
           work_notes: "❌ Failed: {{ error_message }}"
+

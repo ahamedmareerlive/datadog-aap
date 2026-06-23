@@ -78,7 +78,7 @@
 
 
 #################################################
-# PLAY 2: PRE-CHECK
+# PLAY 2: PRE-CHECK (STRICT ✅)
 #################################################
 
 - name: Pre-check Datadog
@@ -87,7 +87,7 @@
 
   tasks:
 
-    - name: Check Datadog API
+    - name: Call Datadog API
       uri:
         url: "https://api.us5.datadoghq.com/api/v1/hosts?filter={{ datadog_host }}"
         method: GET
@@ -97,23 +97,30 @@
       register: dd_check
       failed_when: false
 
-    - name: Exact host match
+    #################################################
+    # ✅ FINAL FIX → STRICT INSTANCE MATCH
+    #################################################
+
+    - name: Validate using AWS instance-id
       set_fact:
         datadog_ok: >-
           {{
             dd_check.json.host_list
             | default([])
-            | selectattr('host_name', 'equalto', datadog_host)
+            | selectattr('meta.aws.instance-id', 'defined')
+            | selectattr('meta.aws.instance-id', 'equalto', datadog_host)
             | list
             | length > 0
           }}
 
     - debug:
-        msg: "Pre-check result: {{ datadog_ok }}"
+        msg:
+          - "Instance ID: {{ datadog_host }}"
+          - "Pre-check result: {{ datadog_ok }}"
 
 
 #################################################
-# PLAY 3: INSTALL (ONLY IF REQUIRED)
+# PLAY 3: INSTALL DATADOG
 #################################################
 
 - name: Install Datadog
@@ -135,11 +142,11 @@
             apt-get update -y
             apt-get install -y curl apt-transport-https
             curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public | gpg --dearmor -o /usr/share/keyrings/datadog.gpg
-            echo "deb [signed-by=/usr/share/keyrings/datadog.gpg] https://apt.datadoghq.com/ stable 7" > /etc/apt/sources.list.d/datadog.list
+            echo "deb [signed-by=/usr/share/keyrings/datadoghq.gpg] https://apt.datadoghq.com/ stable 7" > /etc/apt/sources.list.d/datadog.list
             apt-get update -y
             apt-get install -y datadog-agent
 
-        - name: Create config file
+        - name: Create config
           shell: |
             cp -n /etc/datadog-agent/datadog.yaml.example /etc/datadog-agent/datadog.yaml
 
@@ -160,11 +167,11 @@
       rescue:
         - set_fact:
             global_failed: true
-            error_message: "Install failed"
+            error_message: "Installation failed"
 
 
 #################################################
-# PLAY 4: VERIFY (FIXED WITH DELAY ✅)
+# PLAY 4: VERIFY (DELAY FIX ✅)
 #################################################
 
 - name: Verify Datadog
@@ -176,7 +183,7 @@
     - meta: end_play
       when: datadog_ok or global_failed
 
-    - name: Wait before check (IMPORTANT)
+    - name: Wait for Datadog ingest
       pause:
         seconds: 120
 
@@ -194,28 +201,30 @@
         (
           dd_api.json.host_list
           | default([])
-          | selectattr('host_name', 'equalto', datadog_host)
+          | selectattr('meta.aws.instance-id', 'defined')
+          | selectattr('meta.aws.instance-id', 'equalto', datadog_host)
           | list
           | length
         ) > 0
       failed_when: false
 
-    - name: Evaluate result
+    - name: Final evaluation
       set_fact:
         datadog_ok: >-
           {{
             dd_api.json.host_list
             | default([])
-            | selectattr('host_name', 'equalto', datadog_host)
+            | selectattr('meta.aws.instance-id', 'defined')
+            | selectattr('meta.aws.instance-id', 'equalto', datadog_host)
             | list
             | length > 0
           }}
 
-    - name: Mark failure if not reporting
+    - name: Mark failure
       when: not datadog_ok
       set_fact:
         global_failed: true
-        error_message: "Datadog not reporting"
+        error_message: "Datadog not reporting after install"
 
 
 #################################################
@@ -241,7 +250,7 @@
         body_format: json
         body:
           state: "3"
-          work_notes: "✅ Datadog verified successfully"
+          work_notes: "✅ Datadog successfully verified"
 
     - name: Close Request
       when: datadog_ok and not global_failed

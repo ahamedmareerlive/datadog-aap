@@ -1,6 +1,6 @@
 ---
 #################################################
-# PLAY 1: GET SR + TARGET HOST + EC2 INSTANCE ID
+# PLAY 1: GET SR + TARGET HOST + AWS INSTANCE ID
 #################################################
 
 - name: Get SR and prepare execution
@@ -10,6 +10,7 @@
   vars:
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
     search_text: "Datadog"
+    aws_region: "ap-south-1"   # ✅ FIXED
 
   tasks:
 
@@ -72,16 +73,17 @@
             password: "{{ snow_password }}"
           register: opt
 
-        - name: Set target host (tag Name)
+        - name: Set target host
           set_fact:
             target_host: "{{ opt.json.result.value }}"
 
         #################################################
-        # ✅ AWS LOOKUP FOR INSTANCE ID (KEY FIX)
+        # ✅ AWS LOOKUP (CRITICAL FIX)
         #################################################
 
         - name: Get EC2 instance info by Name tag
           amazon.aws.ec2_instance_info:
+            region: "{{ aws_region }}"
             filters:
               "tag:Name": "{{ target_host }}"
           register: ec2_info
@@ -107,8 +109,7 @@
             groups: dynamic_targets
 
       rescue:
-        - name: Capture Play1 error
-          set_fact:
+        - set_fact:
             global_failed: true
             error_message: "{{ ansible_failed_result.msg | default('Play1 failure') }}"
 
@@ -161,8 +162,7 @@
             enabled: yes
 
       rescue:
-        - name: Capture install failure
-          set_fact:
+        - set_fact:
             datadog_ok: false
             global_failed: true
             error_message: >-
@@ -172,8 +172,9 @@
                 | default('Installation failure')
               }}
 
+
 #################################################
-# PLAY 3: VERIFY DATADOG (WITH INSTANCE ID ✅)
+# PLAY 3: VERIFY DATADOG (WAIT + RETRY)
 #################################################
 
 - name: Verify Datadog Host
@@ -186,7 +187,7 @@
       pause:
         seconds: 60
 
-    - name: Check Datadog using instance ID
+    - name: Check Datadog using instance_id
       uri:
         url: "https://api.us5.datadoghq.com/api/v1/hosts?filter={{ datadog_host }}"
         method: GET
@@ -283,3 +284,4 @@
             value: "{{ helpdesk_group_id }}"
           urgency: "2"
           impact: "2"
+

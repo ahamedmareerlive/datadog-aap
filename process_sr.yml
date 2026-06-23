@@ -15,19 +15,18 @@
   tasks:
 
     - set_fact:
-        datadog_ok: true
+        datadog_ok: false
         global_failed: false
         error_message: ""
 
     - block:
 
-        - name: Get latest SR
+        - name: Get SR
           uri:
-            url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=short_descriptionLIKE{{ search_text }}^active=true^stateIN1,2&sysparm_order_by_desc=sys_created_on&sysparm_limit=1"
+            url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=short_descriptionLIKE{{ search_text }}^active=true^stateIN1,2&sysparm_limit=1"
             method: GET
             user: "{{ snow_user }}"
             password: "{{ snow_password }}"
-            force_basic_auth: yes
           register: sn
 
         - fail:
@@ -38,7 +37,7 @@
             request_item_sys_id: "{{ sn.json.result[0].sys_id }}"
             request_sys_id: "{{ sn.json.result[0].request.value }}"
 
-        - name: Get variables
+        - name: Get host
           uri:
             url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request={{ request_item_sys_id }}"
             method: GET
@@ -47,9 +46,9 @@
           register: mtom
 
         - set_fact:
-            option_sys_id: "{{ (mtom.json.result | sort(attribute='sys_created_on'))[-1].sc_item_option.value }}"
+            option_sys_id: "{{ mtom.json.result[-1].sc_item_option.value }}"
 
-        - name: Get target host
+        - name: Fetch hostname
           uri:
             url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
             method: GET
@@ -60,53 +59,74 @@
         - set_fact:
             target_host: "{{ opt.json.result.value }}"
 
-        - name: Get EC2 instance_id
+        - name: AWS lookup
           amazon.aws.ec2_instance_info:
             region: "{{ aws_region }}"
             filters:
               "tag:Name": "{{ target_host }}"
           register: ec2_info
 
-        - fail:
-            msg: "No EC2 found for {{ target_host }}"
-          when: ec2_info.instances | length == 0
-
         - set_fact:
             datadog_host: "{{ ec2_info.instances[0].instance_id }}"
+            target_ip: "{{ ec2_info.instances[0].public_ip_address }}"
 
         - add_host:
-            name: "{{ target_host }}"
+            name: dynamic_target
+            ansible_host: "{{ target_ip }}"
+            ansible_user: ubuntu
             groups: dynamic_targets
 
       rescue:
         - set_fact:
             global_failed: true
-            error_message: "ServiceNow/AWS failure"
-
+            error_message: "Play1 failure"
 
 #################################################
-# PLAY 2: INSTALL & CONFIGURE DATADOG
+# PLAY 2: PRE-CHECK (DATADOG BEFORE INSTALL)
 #################################################
 
-- name: Install Datadog Agent
+- name: Pre-check Datadog (skip install if already reporting)
+  hosts: localhost
+  gather_facts: no
+
+  tasks:
+
+    - name: Check Datadog API first
+      uri:
+        url: "https://api.us5.datadoghq.com/api/v1/hosts?filter={{ datadog_host }}"
+        method: GET
+        headers:
+          DD-API-KEY: "{{ datadog_api_key }}"
+          DD-APPLICATION-KEY: "{{ datadog_app_key }}"
+      register: dd_check
+      failed_when: false
+
+    - set_fact:
+        datadog_ok: "{{ (dd_check.json.host_list | default([])) | length > 0 }}"
+
+    - name: If already reporting, stop installation path
+      debug:
+        msg: "✅ Host already reporting in Datadog — skipping install"
+      when: datadog_ok
+
+#################################################
+# PLAY 3: INSTALL DATADOG (ONLY IF NEEDED)
+#################################################
+
+- name: Install Datadog
   hosts: dynamic_targets
   become: yes
   gather_facts: no
 
   tasks:
 
-    - name: Check if Datadog installed
-      stat:
-        path: /etc/datadog-agent/datadog.yaml
-      register: dd_installed
-
-    - set_fact:
-        datadog_already_installed: "{{ dd_installed.stat.exists }}"
+    - name: Skip if already reporting
+      meta: end_play
+      when: hostvars['localhost'].datadog_ok
 
     - block:
 
         - name: Install Datadog
-          when: not datadog_already_installed
           shell: |
             set -e
             apt-get update -y
@@ -116,33 +136,17 @@
             apt-get update -y
             apt-get install -y datadog-agent
 
-        #################################################
-        # ✅ CRITICAL FIX: CREATE CONFIG
-        #################################################
-
-        - name: Copy example config if missing
-          when: not datadog_already_installed
+        - name: Create config
           shell: |
-            if [ ! -f /etc/datadog-agent/datadog.yaml ]; then
-              cp /etc/datadog-agent/datadog.yaml.example /etc/datadog-agent/datadog.yaml
-            fi
+            cp -n /etc/datadog-agent/datadog.yaml.example /etc/datadog-agent/datadog.yaml
 
         - name: Set API key
-          when: not datadog_already_installed
           replace:
             path: /etc/datadog-agent/datadog.yaml
             regexp: '^api_key:.*'
             replace: 'api_key: {{ datadog_api_key }}'
 
-        - name: Set Datadog site
-          when: not datadog_already_installed
-          lineinfile:
-            path: /etc/datadog-agent/datadog.yaml
-            line: 'site: us5.datadoghq.com'
-            insertafter: '^api_key:'
-
-        - name: Restart Datadog
-          when: not datadog_already_installed
+        - name: Restart
           service:
             name: datadog-agent
             state: restarted
@@ -151,38 +155,28 @@
       rescue:
         - set_fact:
             global_failed: true
-            datadog_ok: false
-            error_message: "{{ ansible_failed_result.msg | default('Install/config failure') }}"
-
+            error_message: "Install failed"
 
 #################################################
-# PLAY 3: VERIFY DATADOG
+# PLAY 4: VERIFY AFTER INSTALL (ONLY IF INSTALLED)
 #################################################
 
-- name: Verify Datadog Host
+- name: Verify Datadog
   hosts: localhost
   gather_facts: no
 
   tasks:
 
-    - name: Skip if already installed
-      when: hostvars[groups['dynamic_targets'][0]].datadog_already_installed | default(false)
-      set_fact:
-        datadog_ok: true
+    - name: Skip verify if already OK
+      meta: end_play
+      when: datadog_ok or global_failed
 
-    - name: Wait 60 sec
-      when: not datadog_ok and not global_failed
-      pause:
+    - pause:
         seconds: 60
 
-    - name: Check Datadog API
-      when: not datadog_ok and not global_failed
+    - name: Check Datadog again
       uri:
         url: "https://api.us5.datadoghq.com/api/v1/hosts?filter={{ datadog_host }}"
-        method: GET
-        headers:
-          DD-API-KEY: "{{ datadog_api_key }}"
-          DD-APPLICATION-KEY: "{{ datadog_app_key }}"
       register: dd_api
       retries: 5
       delay: 20
@@ -191,20 +185,18 @@
 
     - set_fact:
         datadog_ok: "{{ (dd_api.json.host_list | default([])) | length > 0 }}"
-      when: not datadog_ok
 
-    - name: Mark failure
+    - name: Mark failure if still not reporting
       when: not datadog_ok
       set_fact:
         global_failed: true
-        error_message: "Host not reporting in Datadog"
-
+        error_message: "Datadog not reporting after install"
 
 #################################################
-# PLAY 4: SUCCESS
+# PLAY 5: SUCCESS
 #################################################
 
-- name: Success Handling
+- name: Success
   hosts: localhost
   gather_facts: no
 
@@ -223,7 +215,7 @@
         body_format: json
         body:
           state: "3"
-          work_notes: "✅ Datadog installed or already present"
+          work_notes: "✅ Datadog already present or installed successfully"
 
     - name: Close Request
       when: datadog_ok and not global_failed
@@ -236,9 +228,8 @@
         body:
           state: "3"
 
-
 #################################################
-# PLAY 5: FAILURE
+# PLAY 6: FAILURE
 #################################################
 
 - name: Failure Handling
@@ -251,7 +242,7 @@
 
   tasks:
 
-    - name: Update RITM failure
+    - name: Update RITM
       when: global_failed or not datadog_ok
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
@@ -261,11 +252,7 @@
         body_format: json
         body:
           state: "-5"
-          work_notes: |
-            ❌ Datadog automation FAILED
-
-            ERROR:
-            {{ error_message }}
+          work_notes: "{{ error_message }}"
 
     - name: Create Incident
       when: global_failed or not datadog_ok
@@ -275,15 +262,9 @@
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
         body_format: json
-        status_code: [200, 201]
+        status_code: [200,201]
         body:
-          short_description: "Datadog Installation Failed"
-          description: |
-            Host: {{ target_host }}
-            Instance: {{ datadog_host }}
-
-            ERROR:
-            {{ error_message }}
+          short_description: "Datadog failure"
+          description: "{{ error_message }}"
           assignment_group:
             value: "{{ helpdesk_group_id }}"
-

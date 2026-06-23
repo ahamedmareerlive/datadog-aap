@@ -247,16 +247,27 @@
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
+        force_basic_auth: yes
       register: group_data
       failed_when: false
 
-    - name: Set group sys_id safely
-      set_fact:
-        helpdesk_group_id: "{{ group_data.json.result[0].sys_id if (group_data.json.result | length > 0) else '' }}"
-
-    - name: Debug group
+    - name: Debug group API response
       debug:
-        msg: "HelpDesk Group ID = {{ helpdesk_group_id }}"
+        var: group_data
+
+    - name: Safely extract group sys_id
+      set_fact:
+        helpdesk_group_id: >-
+          {{
+            (group_data.json.result[0].sys_id)
+            if (
+              group_data is defined and
+              group_data.json is defined and
+              group_data.json.result is defined and
+              (group_data.json.result | length > 0)
+            )
+            else ''
+          }}
 
     - name: Create Incident
       when: global_failed or not datadog_ok
@@ -291,3 +302,4 @@
         body:
           state: "-5"
           work_notes: "❌ Failed: {{ error_message }}"
+

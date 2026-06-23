@@ -19,7 +19,7 @@
         global_failed: false
         error_message: ""
 
-    - name: ServiceNow + Input Processing
+    - name: ServiceNow processing
       block:
 
         - name: Get latest SR
@@ -101,7 +101,7 @@
 
   tasks:
 
-    - name: Datadog installation block
+    - name: Datadog install block
       block:
 
         - name: Check Datadog installed
@@ -146,12 +146,11 @@
               {{
                 ansible_failed_result.msg
                 | default(ansible_failed_result.stderr, true)
-                | default('Installation failed')
+                | default('Installation failure')
               }}
 
-        - name: Continue after failure
-          debug:
-            msg: "Installation failed but workflow continues"
+        - debug:
+            msg: "❌ Installation failed but continuing"
 
 
 #################################################
@@ -167,7 +166,7 @@
     - name: Verification block
       block:
 
-        - name: Check host in Datadog
+        - name: Call Datadog API
           uri:
             url: "https://api.us5.datadoghq.com/api/v1/hosts?filter={{ target_host | default('unknown') }}"
             method: GET
@@ -180,7 +179,7 @@
           set_fact:
             datadog_ok: "{{ (dd_api.json.host_list | default([])) | length > 0 }}"
 
-        - name: Mark failure if not reporting
+        - name: Mark failure if not found
           when: not datadog_ok
           set_fact:
             global_failed: true
@@ -244,16 +243,20 @@
 
     - name: Get Help Desk group sys_id
       uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sys_user_group?sysparm_query=name=Help Desk"
+        url: "https://{{ servicenow_instance }}/api/now/table/sys_user_group?sysparm_query=nameLIKEHelp Desk"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
       register: group_data
       failed_when: false
 
-    - name: Set group sys_id
+    - name: Set group sys_id safely
       set_fact:
-        helpdesk_group_id: "{{ group_data.json.result[0].sys_id | default('') }}"
+        helpdesk_group_id: "{{ group_data.json.result[0].sys_id if (group_data.json.result | length > 0) else '' }}"
+
+    - name: Debug group
+      debug:
+        msg: "HelpDesk Group ID = {{ helpdesk_group_id }}"
 
     - name: Create Incident
       when: global_failed or not datadog_ok
@@ -273,7 +276,7 @@
 
             ERROR:
             {{ error_message }}
-          assignment_group: "{{ helpdesk_group_id }}"
+          assignment_group: "{{ helpdesk_group_id if helpdesk_group_id != '' else omit }}"
           urgency: "2"
           impact: "2"
 

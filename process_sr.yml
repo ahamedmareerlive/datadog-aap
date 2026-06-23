@@ -1,6 +1,6 @@
 ---
 #################################################
-# PLAY 1: GET LATEST SR + TARGET HOST
+# PLAY 1: GET LATEST SN + EC2 INSTANCE
 #################################################
 
 - name: Get latest SR and EC2 details
@@ -17,16 +17,12 @@
         datadog_ok: false
 
     #################################################
-    # ✅ FETCH ONLY LATEST SR
+    # ✅ FETCH ONLY LATEST SR (FIXED)
     #################################################
 
-    - name: Get latest SR (ONLY latest)
+    - name: Get latest SR
       uri:
-        url: >-
-          https://{{ servicenow_instance }}/api/now/table/sc_req_item?
-          sysparm_query=active=true^stateIN1,2
-          &sysparm_order_by_desc=sys_created_on
-          &sysparm_limit=1
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=active=true^stateIN1,2^ORDERBYDESCsys_created_on&sysparm_limit=1"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
@@ -35,13 +31,15 @@
 
     - name: Validate SR exists
       fail:
-        msg: "No active SR found"
+        msg: "❌ No active SR found"
       when: sn.json.result | length == 0
 
-    - debug:
+    - name: Debug SR
+      debug:
         msg:
-          - "Latest RITM: {{ sn.json.result[0].sys_id }}"
+          - "RITM: {{ sn.json.result[0].sys_id }}"
           - "Created: {{ sn.json.result[0].sys_created_on }}"
+          - "Description: {{ sn.json.result[0].short_description }}"
 
     - set_fact:
         request_item_sys_id: "{{ sn.json.result[0].sys_id }}"
@@ -83,13 +81,13 @@
         target_host: "{{ opt.json.result.value }}"
 
     - debug:
-        msg: "✅ Target host from SN: {{ target_host }}"
+        msg: "✅ ServiceNow target_host: {{ target_host }}"
 
     #################################################
-    # ✅ AWS LOOKUP (FIXED)
+    # ✅ AWS LOOKUP (CORRECT ✅)
     #################################################
 
-    - name: Get EC2 instance using Name tag
+    - name: Get EC2 by Name tag
       amazon.aws.ec2_instance_info:
         region: "{{ aws_region }}"
         filters:
@@ -101,7 +99,7 @@
 
     - name: Ensure instance found
       fail:
-        msg: "No EC2 found for {{ target_host }}"
+        msg: "❌ No EC2 found for {{ target_host }}"
       when: ec2_info.instances | length == 0
 
     - set_fact:
@@ -110,8 +108,8 @@
 
     - debug:
         msg:
-          - "✅ Instance ID: {{ datadog_host }}"
-          - "✅ Public IP: {{ target_ip }}"
+          - "✅ Correct Instance ID: {{ datadog_host }}"
+          - "✅ Target IP: {{ target_ip }}"
 
     - add_host:
         name: dynamic_target
@@ -140,7 +138,7 @@
       register: dd_check
       failed_when: false
 
-    - name: Extract instance list
+    - name: Extract Datadog instances
       set_fact:
         dd_instances: >-
           {{
@@ -152,8 +150,8 @@
 
     - debug:
         msg:
-          - "Datadog instances: {{ dd_instances }}"
-          - "Target instance: {{ datadog_host }}"
+          - "📦 Datadog instances: {{ dd_instances }}"
+          - "🎯 Target instance: {{ datadog_host }}"
 
     - set_fact:
         datadog_ok: "{{ datadog_host in dd_instances }}"
@@ -163,7 +161,7 @@
 
 
 #################################################
-# PLAY 3: INSTALL
+# PLAY 3: INSTALL DATADOG (IF NEEDED)
 #################################################
 
 - name: Install Datadog
@@ -189,10 +187,6 @@
         apt-get update -y
         apt-get install -y datadog-agent
 
-    - name: Create config
-      shell: |
-        cp -n /etc/datadog-agent/datadog.yaml.example /etc/datadog-agent/datadog.yaml
-
     - name: Configure Datadog
       blockinfile:
         path: /etc/datadog-agent/datadog.yaml
@@ -201,7 +195,7 @@
           site: us5.datadoghq.com
           dd_url: https://app.us5.datadoghq.com
 
-    - name: Restart agent
+    - name: Restart Datadog
       service:
         name: datadog-agent
         state: restarted
@@ -248,8 +242,8 @@
 
     - debug:
         msg:
-          - "After install: {{ dd_instances }}"
-          - "Target: {{ datadog_host }}"
+          - "📦 After install instances: {{ dd_instances }}"
+          - "🎯 Target: {{ datadog_host }}"
 
     - set_fact:
         datadog_ok: "{{ datadog_host in dd_instances }}"

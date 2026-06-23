@@ -37,7 +37,7 @@
         request_sys_id: "{{ sn.json.result[0].request.value }}"
 
     #################################################
-    # ✅ GET HOST VALUE
+    # GET HOST VARIABLE
     #################################################
 
     - name: Get MTOM mapping
@@ -68,7 +68,7 @@
           }}
 
     #################################################
-    # ✅ AWS LOOKUP + TAG BASED USER
+    # AWS LOOKUP + TAG BASED USER
     #################################################
 
     - block:
@@ -98,7 +98,7 @@
             target_ip: "{{ matched_instances[0].public_ip_address }}"
             ec2_os: "{{ matched_instances[0].tags.OS | default('amzn') | lower }}"
 
-        - name: Set ansible user (TAG BASED ✅)
+        - name: Set ansible user
           set_fact:
             dynamic_user: "{{ 'ubuntu' if ec2_os == 'ubuntu' else 'ec2-user' }}"
 
@@ -116,7 +116,7 @@
 
 
 #################################################
-# PLAY 2: DATADOG PRE-CHECK
+# PLAY 2: DATADOG PRECHECK
 #################################################
 
 - name: Datadog Pre-check
@@ -140,7 +140,7 @@
 
 
 #################################################
-# PLAY 3: INSTALL DATADOG (ALL LINUX ✅)
+# PLAY 3: INSTALL DATADOG (FIXED ✅)
 #################################################
 
 - name: Install Datadog
@@ -153,7 +153,7 @@
     - meta: end_play
       when: hostvars['localhost'].datadog_ok or hostvars['localhost'].global_failed
 
-    - name: Install Datadog agent (Universal)
+    - name: Install Datadog agent (ALL LINUX ✅)
       shell: |
         set -e
 
@@ -163,18 +163,28 @@
 
         echo "Detected OS: $ID"
 
+        #################################################
+        # UBUNTU / DEBIAN
+        #################################################
         if [[ "$ID" == "ubuntu" || "$ID" == "debian" ]]; then
           apt-get update -y
           apt-get install -y curl apt-transport-https
+
           curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public | \
           gpg --dearmor -o /usr/share/keyrings/datadog.gpg
+
           echo "deb [signed-by=/usr/share/keyrings/datadog.gpg] https://apt.datadoghq.com/ stable 7" > \
           /etc/apt/sources.list.d/datadog.list
+
           apt-get update -y
           apt-get install -y datadog-agent
 
-        elif [[ "$ID" == "amzn" || "$ID" == "rhel" || "$ID" == "centos" || "$ID" == "almalinux" || "$ID" == "rocky" ]]; then
+        #################################################
+        # RHEL/CENTOS/AMZN
+        #################################################
+        else
           yum install -y curl
+
           cat <<EOF > /etc/yum.repos.d/datadog.repo
 [datadog]
 name=Datadog
@@ -183,11 +193,8 @@ enabled=1
 gpgcheck=1
 gpgkey=https://keys.datadoghq.com/DATADOG_RPM_KEY_CURRENT.public
 EOF
-          yum install -y datadog-agent
 
-        else
-          echo "Unsupported OS"
-          exit 1
+          yum install -y datadog-agent
         fi
 
     - name: Ensure config exists
@@ -209,7 +216,7 @@ EOF
 
 
 #################################################
-# PLAY 4: VERIFY (FIXED ✅)
+# PLAY 4: VERIFY
 #################################################
 
 - name: Verify Datadog
@@ -218,13 +225,10 @@ EOF
 
   tasks:
 
-    - meta: end_play
-      when: datadog_ok or global_failed
-
     - pause:
         seconds: 180
 
-    - name: Retry until appears in Datadog
+    - name: Retry until appears
       uri:
         url: "https://api.us5.datadoghq.com/api/v1/hosts"
         method: GET
@@ -232,7 +236,7 @@ EOF
           DD-API-KEY: "{{ datadog_api_key }}"
           DD-APPLICATION-KEY: "{{ datadog_app_key }}"
       register: dd_api
-      retries: 12
+      retries: 10
       delay: 30
       until: datadog_host in (dd_api.json.host_list | map(attribute='host_name') | list)
       failed_when: false

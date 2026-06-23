@@ -19,6 +19,10 @@
         global_failed: false
         error_message: ""
 
+    #################################################
+    # ✅ GET LATEST RITM
+    #################################################
+
     - name: Get latest RITM
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=active=true^stateIN1,2^ORDERBYDESCsys_created_on&sysparm_limit=1"
@@ -37,19 +41,25 @@
         request_sys_id: "{{ sn.json.result[0].request.value }}"
 
     #################################################
-    # GET HOST
+    # ✅ GET VARIABLES
     #################################################
 
     - name: Get MTOM mapping
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request_item={{ request_item_sys_id }}"
         method: GET
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        force_basic_auth: yes
       register: mtom
 
     - name: Get variable values
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ item.sc_item_option.value }}"
         method: GET
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        force_basic_auth: yes
       loop: "{{ mtom.json.result }}"
       register: all_vars
 
@@ -64,7 +74,7 @@
           }}
 
     #################################################
-    # AWS LOOKUP
+    # ✅ AWS LOOKUP
     #################################################
 
     - name: Get EC2 instances
@@ -86,7 +96,8 @@
         msg: "No EC2 found"
       when: matched_instances | length == 0
 
-    - set_fact:
+    - name: Set instance details
+      set_fact:
         datadog_host: "{{ matched_instances[0].instance_id }}"
         target_ip: "{{ matched_instances[0].public_ip_address }}"
         ec2_os: "{{ matched_instances[0].tags.OS | default('amzn') | lower }}"
@@ -95,8 +106,13 @@
     # ✅ TAG BASED USER
     #################################################
 
-    - set_fact:
+    - name: Set ansible user
+      set_fact:
         dynamic_user: "{{ 'ubuntu' if ec2_os == 'ubuntu' else 'ec2-user' }}"
+
+    #################################################
+    # ✅ ADD HOST
+    #################################################
 
     - name: Add dynamic host
       add_host:
@@ -173,7 +189,7 @@
           deb [signed-by=/usr/share/keyrings/datadog-archive-keyring.gpg] https://apt.datadoghq.com/ stable 7
       when: ansible_os_family == "Debian"
 
-    - name: Install Datadog Debian
+    - name: Install datadog (Debian)
       apt:
         name: datadog-agent
         update_cache: yes
@@ -181,7 +197,7 @@
       when: ansible_os_family == "Debian"
 
     #################################################
-    # ✅ RHEL / AMZN
+    # ✅ RHEL / AMAZON LINUX
     #################################################
 
     - name: Add yum repo
@@ -196,31 +212,31 @@
           gpgkey=https://keys.datadoghq.com/DATADOG_RPM_KEY_CURRENT.public
       when: ansible_os_family == "RedHat"
 
-    - name: Install Datadog yum
+    - name: Install datadog (RPM)
       yum:
         name: datadog-agent
         state: present
       when: ansible_os_family == "RedHat"
 
     #################################################
-    # CONFIG
+    # ✅ CONFIGURATION
     #################################################
 
-    - name: Ensure config
+    - name: Ensure config file
       copy:
         src: /etc/datadog-agent/datadog.yaml.example
         dest: /etc/datadog-agent/datadog.yaml
         remote_src: yes
         force: no
 
-    - name: Configure
+    - name: Configure Datadog
       blockinfile:
         path: /etc/datadog-agent/datadog.yaml
         block: |
           api_key: {{ datadog_api_key }}
           site: us5.datadoghq.com
 
-    - name: Restart agent
+    - name: Restart Datadog
       service:
         name: datadog-agent
         state: restarted
@@ -240,7 +256,7 @@
     - pause:
         seconds: 180
 
-    - name: Retry until visible
+    - name: Retry until host visible
       uri:
         url: "https://api.us5.datadoghq.com/api/v1/hosts"
         method: GET
@@ -255,6 +271,12 @@
 
     - set_fact:
         datadog_ok: "{{ datadog_host in (dd_api.json.host_list | map(attribute='host_name') | list) }}"
+
+    - name: Fail if still not reporting
+      when: not datadog_ok
+      set_fact:
+        global_failed: true
+        error_message: "Datadog not reporting"
 
 
 #################################################
@@ -278,10 +300,11 @@
         method: PATCH
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
+        force_basic_auth: yes
         body_format: json
         body:
           state: "3"
-          work_notes: "Datadog installed successfully"
+          work_notes: "✅ Datadog installed successfully"
 
     - name: Close Request
       when: datadog_ok
@@ -290,18 +313,23 @@
         method: PATCH
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
+        force_basic_auth: yes
         body_format: json
         body:
           state: "3"
 
-    - name: Failure handling
+    - name: Create incident on failure
       when: not datadog_ok
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/incident"
         method: POST
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
+        force_basic_auth: yes
         body_format: json
-        status_code: [200, 201]
+        status_code: [200,201]
         body:
           short_description: "Datadog installation failed"
+          description: "{{ error_message }}"
+          assignment_group:
+            value: "{{ helpdesk_group_id }}"

@@ -1,9 +1,9 @@
 ---
 #################################################
-# PLAY 1: GET LATEST SN + EC2 INSTANCE
+# PLAY 1: FETCH ONLY LATEST RITM + INSTANCE
 #################################################
 
-- name: Get latest SR and EC2 details
+- name: Get latest RITM and instance details
   hosts: localhost
   gather_facts: no
 
@@ -17,35 +17,35 @@
         datadog_ok: false
 
     #################################################
-    # ✅ FETCH ONLY LATEST SR (FIXED)
+    # ✅ ONLY LATEST RITM (CRITICAL FIX ✅)
     #################################################
 
-    - name: Get latest SR
+    - name: Get latest Datadog RITM only
       uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=active=true^stateIN1,2^ORDERBYDESCsys_created_on&sysparm_limit=1"
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=short_descriptionLIKEDatadog^active=true^stateIN1,2^ORDERBYDESCsys_created_on&sysparm_limit=1"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
         force_basic_auth: yes
       register: sn
 
-    - name: Validate SR exists
+    - name: Validate latest RITM exists
       fail:
-        msg: "❌ No active SR found"
+        msg: "❌ No active Datadog RITM found"
       when: sn.json.result | length == 0
 
-    - name: Debug SR
+    - name: DEBUG latest RITM
       debug:
         msg:
-          - "RITM: {{ sn.json.result[0].sys_id }}"
-          - "Created: {{ sn.json.result[0].sys_created_on }}"
-          - "Description: {{ sn.json.result[0].short_description }}"
+          - "✅ RITM Number: {{ sn.json.result[0].number }}"
+          - "✅ Sys ID: {{ sn.json.result[0].sys_id }}"
+          - "✅ Created: {{ sn.json.result[0].sys_created_on }}"
 
     - set_fact:
         request_item_sys_id: "{{ sn.json.result[0].sys_id }}"
 
     #################################################
-    # ✅ GET VARIABLES
+    # ✅ FETCH VARIABLES
     #################################################
 
     - name: Get variables
@@ -63,10 +63,10 @@
         option_sys_id: "{{ mtom.json.result[-1].sc_item_option.value }}"
 
     #################################################
-    # ✅ GET HOST VALUE
+    # ✅ EXTRACT HOST
     #################################################
 
-    - name: Get variable value
+    - name: Get host value
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
         method: GET
@@ -81,10 +81,10 @@
         target_host: "{{ opt.json.result.value }}"
 
     - debug:
-        msg: "✅ ServiceNow target_host: {{ target_host }}"
+        msg: "✅ Target host from ServiceNow: {{ target_host }}"
 
     #################################################
-    # ✅ AWS LOOKUP (CORRECT ✅)
+    # ✅ AWS LOOKUP (CORRECT INSTANCE ✅)
     #################################################
 
     - name: Get EC2 by Name tag
@@ -97,9 +97,9 @@
     - debug:
         var: ec2_info.instances
 
-    - name: Ensure instance found
+    - name: Ensure instance exists
       fail:
-        msg: "❌ No EC2 found for {{ target_host }}"
+        msg: "❌ No EC2 instance found for {{ target_host }}"
       when: ec2_info.instances | length == 0
 
     - set_fact:
@@ -108,7 +108,7 @@
 
     - debug:
         msg:
-          - "✅ Correct Instance ID: {{ datadog_host }}"
+          - "✅ Instance ID: {{ datadog_host }}"
           - "✅ Target IP: {{ target_ip }}"
 
     - add_host:
@@ -122,13 +122,13 @@
 # PLAY 2: DATADOG PRE-CHECK
 #################################################
 
-- name: Datadog Pre-check
+- name: Pre-check Datadog
   hosts: localhost
   gather_facts: no
 
   tasks:
 
-    - name: Call Datadog API
+    - name: Get Datadog hosts
       uri:
         url: "https://api.us5.datadoghq.com/api/v1/hosts"
         method: GET
@@ -138,8 +138,7 @@
       register: dd_check
       failed_when: false
 
-    - name: Extract Datadog instances
-      set_fact:
+    - set_fact:
         dd_instances: >-
           {{
             dd_check.json.host_list | default([])
@@ -161,10 +160,10 @@
 
 
 #################################################
-# PLAY 3: INSTALL DATADOG (IF NEEDED)
+# PLAY 3: INSTALL DATADOG
 #################################################
 
-- name: Install Datadog
+- name: Install Datadog if needed
   hosts: dynamic_targets
   become: yes
   gather_facts: no
@@ -206,7 +205,7 @@
 # PLAY 4: VERIFY
 #################################################
 
-- name: Verify Datadog
+- name: Verify Datadog reporting
   hosts: localhost
   gather_facts: no
 
@@ -218,7 +217,7 @@
     - pause:
         seconds: 120
 
-    - name: Call Datadog API again
+    - name: Verify again
       uri:
         url: "https://api.us5.datadoghq.com/api/v1/hosts"
         method: GET
@@ -242,7 +241,7 @@
 
     - debug:
         msg:
-          - "📦 After install instances: {{ dd_instances }}"
+          - "📦 After install: {{ dd_instances }}"
           - "🎯 Target: {{ datadog_host }}"
 
     - set_fact:

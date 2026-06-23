@@ -10,7 +10,7 @@
   vars:
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
     search_text: "Datadog"
-    aws_region: "ap-south-1"   # ✅ FIXED
+    aws_region: "ap-south-1"
 
   tasks:
 
@@ -78,7 +78,7 @@
             target_host: "{{ opt.json.result.value }}"
 
         #################################################
-        # ✅ AWS LOOKUP (CRITICAL FIX)
+        # AWS LOOKUP
         #################################################
 
         - name: Get EC2 instance info by Name tag
@@ -93,15 +93,9 @@
             msg: "No EC2 instance found for {{ target_host }}"
           when: ec2_info.instances | length == 0
 
-        - name: Set instance_id for Datadog
+        - name: Set instance_id
           set_fact:
             datadog_host: "{{ ec2_info.instances[0].instance_id }}"
-
-        - name: Debug mapping
-          debug:
-            msg:
-              - "Hostname: {{ target_host }}"
-              - "Instance ID: {{ datadog_host }}"
 
         - name: Add dynamic host
           add_host:
@@ -129,8 +123,7 @@
     - name: Datadog install block
       block:
 
-        - name: Check Datadog installed
-          stat:
+        - stat:
             path: /etc/datadog-agent/datadog.yaml
           register: dd_installed
 
@@ -165,12 +158,7 @@
         - set_fact:
             datadog_ok: false
             global_failed: true
-            error_message: >-
-              {{
-                ansible_failed_result.msg
-                | default(ansible_failed_result.stderr, true)
-                | default('Installation failure')
-              }}
+            error_message: "{{ ansible_failed_result.msg | default('Install failure') }}"
 
 
 #################################################
@@ -183,11 +171,10 @@
 
   tasks:
 
-    - name: Wait 60 seconds
-      pause:
+    - pause:
         seconds: 60
 
-    - name: Check Datadog using instance_id
+    - name: Check Datadog
       uri:
         url: "https://api.us5.datadoghq.com/api/v1/hosts?filter={{ datadog_host }}"
         method: GET
@@ -197,20 +184,17 @@
       register: dd_api
       retries: 5
       delay: 20
-      until: >
-        (dd_api.json.host_list is defined) and
-        ((dd_api.json.host_list | length) > 0)
+      until: dd_api.json.host_list | length > 0
       failed_when: false
 
-    - name: Evaluate result
-      set_fact:
+    - set_fact:
         datadog_ok: "{{ (dd_api.json.host_list | default([])) | length > 0 }}"
 
-    - name: Mark failure if not reporting
+    - name: Mark failure
       when: not datadog_ok
       set_fact:
         global_failed: true
-        error_message: "Host ({{ datadog_host }}) not reporting in Datadog"
+        error_message: "Host {{ datadog_host }} not reporting"
 
 
 #################################################
@@ -220,6 +204,9 @@
 - name: Update ServiceNow Success
   hosts: localhost
   gather_facts: no
+
+  vars:
+    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
 
   tasks:
 
@@ -273,8 +260,6 @@
         body:
           short_description: "Datadog Installation Failed"
           description: |
-            Automation Failure
-
             Host: {{ target_host }}
             Instance ID: {{ datadog_host }}
 
@@ -285,3 +270,14 @@
           urgency: "2"
           impact: "2"
 
+    - name: Set RITM Pending
+      when: global_failed or not datadog_ok
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        body_format: json
+        body:
+          state: "-5"
+          work_notes: "❌ Failed: {{ error_message }}"

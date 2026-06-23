@@ -137,7 +137,7 @@
 
 
 #################################################
-# PLAY 3: INSTALL WITH ERROR HANDLING
+# PLAY 3: INSTALL WITH ERROR HANDLING ✅
 #################################################
 
 - name: Install Datadog
@@ -157,7 +157,7 @@
     - block:
 
         #################################################
-        # DEBIAN / UBUNTU
+        # UBUNTU / DEBIAN
         #################################################
 
         - name: Install dependencies
@@ -239,7 +239,7 @@
             enabled: yes
 
       #################################################
-      # ERROR HANDLING
+      # ERROR HANDLING (FIXED ✅ NO SUDO)
       #################################################
 
       rescue:
@@ -248,8 +248,12 @@
             global_failed: true
             error_message: "{{ ansible_failed_result.msg | default('Unknown error') }}"
 
+        - debug:
+            var: error_message
+
         - name: Update RITM on failure
           delegate_to: localhost
+          become: false
           uri:
             url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ hostvars['localhost'].request_item_sys_id }}"
             method: PATCH
@@ -263,6 +267,7 @@
 
         - name: Create incident
           delegate_to: localhost
+          become: false
           uri:
             url: "https://{{ servicenow_instance }}/api/now/table/incident"
             method: POST
@@ -270,7 +275,7 @@
             password: "{{ snow_password }}"
             force_basic_auth: yes
             body_format: json
-            status_code: [200,201]
+            status_code: [200, 201]
             body:
               short_description: "Datadog install failed"
               description: "{{ error_message }}"
@@ -310,7 +315,7 @@
 
 
 #################################################
-# PLAY 5: FINAL
+# PLAY 5: FINAL SUCCESS
 #################################################
 
 - name: Final Handling

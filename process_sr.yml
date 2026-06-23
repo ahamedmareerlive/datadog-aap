@@ -37,23 +37,19 @@
         request_sys_id: "{{ sn.json.result[0].request.value }}"
 
     #################################################
-    # GET HOST VARIABLE
+    # GET HOST
     #################################################
 
     - name: Get MTOM mapping
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request_item={{ request_item_sys_id }}"
         method: GET
-        user: "{{ snow_user }}"
-        password: "{{ snow_password }}"
       register: mtom
 
     - name: Get variable values
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ item.sc_item_option.value }}"
         method: GET
-        user: "{{ snow_user }}"
-        password: "{{ snow_password }}"
       loop: "{{ mtom.json.result }}"
       register: all_vars
 
@@ -68,50 +64,46 @@
           }}
 
     #################################################
-    # AWS LOOKUP + TAG BASED USER
+    # AWS LOOKUP
     #################################################
 
-    - block:
+    - name: Get EC2 instances
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+      register: ec2_info
 
-        - name: Get EC2 instances
-          amazon.aws.ec2_instance_info:
-            region: "{{ aws_region }}"
-          register: ec2_info
+    - name: Match instance
+      set_fact:
+        matched_instances: >-
+          {{
+            ec2_info.instances
+            | selectattr('tags.Name', 'defined')
+            | selectattr('tags.Name', 'search', target_host)
+            | list
+          }}
 
-        - name: Match instance
-          set_fact:
-            matched_instances: >-
-              {{
-                ec2_info.instances
-                | selectattr('tags.Name', 'defined')
-                | selectattr('tags.Name', 'search', target_host)
-                | list
-              }}
+    - fail:
+        msg: "No EC2 found"
+      when: matched_instances | length == 0
 
-        - fail:
-            msg: "No EC2 found"
-          when: matched_instances | length == 0
+    - set_fact:
+        datadog_host: "{{ matched_instances[0].instance_id }}"
+        target_ip: "{{ matched_instances[0].public_ip_address }}"
+        ec2_os: "{{ matched_instances[0].tags.OS | default('amzn') | lower }}"
 
-        - set_fact:
-            datadog_host: "{{ matched_instances[0].instance_id }}"
-            target_ip: "{{ matched_instances[0].public_ip_address }}"
-            ec2_os: "{{ matched_instances[0].tags.OS | default('amzn') | lower }}"
+    #################################################
+    # ✅ TAG BASED USER
+    #################################################
 
-        - name: Set ansible user (TAG BASED)
-          set_fact:
-            dynamic_user: "{{ 'ubuntu' if ec2_os == 'ubuntu' else 'ec2-user' }}"
+    - set_fact:
+        dynamic_user: "{{ 'ubuntu' if ec2_os == 'ubuntu' else 'ec2-user' }}"
 
-        - name: Add dynamic host
-          add_host:
-            name: dynamic_target
-            ansible_host: "{{ target_ip }}"
-            ansible_user: "{{ dynamic_user }}"
-            groups: dynamic_targets
-
-      rescue:
-        - set_fact:
-            global_failed: true
-            error_message: "EC2 lookup failed"
+    - name: Add dynamic host
+      add_host:
+        name: dynamic_target
+        ansible_host: "{{ target_ip }}"
+        ansible_user: "{{ dynamic_user }}"
+        groups: dynamic_targets
 
 
 #################################################
@@ -139,7 +131,7 @@
 
 
 #################################################
-# PLAY 3: INSTALL DATADOG (MODULE BASED ✅)
+# PLAY 3: INSTALL DATADOG
 #################################################
 
 - name: Install Datadog
@@ -150,25 +142,38 @@
   tasks:
 
     - meta: end_play
-      when: hostvars['localhost'].datadog_ok or hostvars['localhost'].global_failed
+      when: hostvars['localhost'].datadog_ok
 
     #################################################
-    # ✅ UBUNTU / DEBIAN
+    # ✅ DEBIAN / UBUNTU FIXED
     #################################################
 
-    - name: Install dependencies (Debian)
+    - name: Install dependencies
       apt:
-        name: apt-transport-https
+        name:
+          - apt-transport-https
+          - curl
+          - gnupg
         state: present
+        update_cache: yes
       when: ansible_os_family == "Debian"
 
-    - name: Add Datadog apt repo
+    - name: Add Datadog GPG key
+      shell: |
+        curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public \
+        | gpg --dearmor -o /usr/share/keyrings/datadog-archive-keyring.gpg
+      args:
+        creates: /usr/share/keyrings/datadog-archive-keyring.gpg
+      when: ansible_os_family == "Debian"
+
+    - name: Add Datadog repo
       copy:
         dest: /etc/apt/sources.list.d/datadog.list
-        content: "deb https://apt.datadoghq.com/ stable 7"
+        content: |
+          deb [signed-by=/usr/share/keyrings/datadog-archive-keyring.gpg] https://apt.datadoghq.com/ stable 7
       when: ansible_os_family == "Debian"
 
-    - name: Install Datadog (Debian)
+    - name: Install Datadog Debian
       apt:
         name: datadog-agent
         update_cache: yes
@@ -176,10 +181,10 @@
       when: ansible_os_family == "Debian"
 
     #################################################
-    # ✅ RHEL/CENTOS/AMAZON
+    # ✅ RHEL / AMZN
     #################################################
 
-    - name: Add Datadog yum repo
+    - name: Add yum repo
       copy:
         dest: /etc/yum.repos.d/datadog.repo
         content: |
@@ -191,7 +196,7 @@
           gpgkey=https://keys.datadoghq.com/DATADOG_RPM_KEY_CURRENT.public
       when: ansible_os_family == "RedHat"
 
-    - name: Install Datadog (RPM based)
+    - name: Install Datadog yum
       yum:
         name: datadog-agent
         state: present
@@ -201,21 +206,21 @@
     # CONFIG
     #################################################
 
-    - name: Ensure config file
+    - name: Ensure config
       copy:
         src: /etc/datadog-agent/datadog.yaml.example
         dest: /etc/datadog-agent/datadog.yaml
         remote_src: yes
         force: no
 
-    - name: Configure Datadog
+    - name: Configure
       blockinfile:
         path: /etc/datadog-agent/datadog.yaml
         block: |
           api_key: {{ datadog_api_key }}
           site: us5.datadoghq.com
 
-    - name: Restart service
+    - name: Restart agent
       service:
         name: datadog-agent
         state: restarted
@@ -251,12 +256,6 @@
     - set_fact:
         datadog_ok: "{{ datadog_host in (dd_api.json.host_list | map(attribute='host_name') | list) }}"
 
-    - name: Mark failure
-      when: not datadog_ok
-      set_fact:
-        global_failed: true
-        error_message: "Datadog not reporting"
-
 
 #################################################
 # PLAY 5: FINAL HANDLING
@@ -273,7 +272,7 @@
   tasks:
 
     - name: Close RITM
-      when: datadog_ok and not global_failed
+      when: datadog_ok
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
         method: PATCH
@@ -285,7 +284,7 @@
           work_notes: "Datadog installed successfully"
 
     - name: Close Request
-      when: datadog_ok and not global_failed
+      when: datadog_ok
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_request/{{ request_sys_id }}"
         method: PATCH
@@ -295,20 +294,8 @@
         body:
           state: "3"
 
-    - name: Update failure
-      when: global_failed or not datadog_ok
-      uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
-        method: PATCH
-        user: "{{ snow_user }}"
-        password: "{{ snow_password }}"
-        body_format: json
-        body:
-          state: "-5"
-          work_notes: "Failed: {{ error_message }}"
-
-    - name: Create incident
-      when: global_failed or not datadog_ok
+    - name: Failure handling
+      when: not datadog_ok
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/incident"
         method: POST
@@ -317,7 +304,4 @@
         body_format: json
         status_code: [200, 201]
         body:
-          short_description: "Datadog automation failed"
-          description: "{{ error_message }}"
-          assignment_group:
-            value: "{{ helpdesk_group_id }}"
+          short_description: "Datadog installation failed"

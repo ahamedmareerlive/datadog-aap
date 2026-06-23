@@ -1,6 +1,6 @@
 ---
 #################################################
-# PLAY 1: GET HOST DETAILS
+# PLAY 1: GET EC2 INSTANCE DETAILS
 #################################################
 
 - name: Get Target Host
@@ -12,26 +12,24 @@
 
   tasks:
 
-    - set_fact:
-        datadog_ok: false
-        global_failed: false
-
-    - name: AWS lookup
+    - name: Get EC2 info
       amazon.aws.ec2_instance_info:
         region: "{{ aws_region }}"
       register: ec2_info
 
-    - name: Pick first instance (DEBUG PURPOSE)
+    - name: Pick first instance (for debug)
       set_fact:
         datadog_host: "{{ ec2_info.instances[0].instance_id }}"
         target_ip: "{{ ec2_info.instances[0].public_ip_address }}"
 
-    - debug:
+    - name: Print instance details
+      debug:
         msg:
           - "✅ Instance ID: {{ datadog_host }}"
           - "✅ Public IP: {{ target_ip }}"
 
-    - add_host:
+    - name: Add dynamic host
+      add_host:
         name: dynamic_target
         ansible_host: "{{ target_ip }}"
         ansible_user: ubuntu
@@ -42,7 +40,7 @@
 # PLAY 2: DATADOG PRE-CHECK (FULL DEBUG)
 #################################################
 
-- name: Datadog Pre-check Debug
+- name: Datadog Pre-check
   hosts: localhost
   gather_facts: no
 
@@ -58,13 +56,13 @@
       register: dd_check
       failed_when: false
 
-    - name: Print full API response (IMPORTANT)
+    - name: Show full response
       debug:
-        var: dd_check.json
+        var: dd_check.json.host_list
 
-    - name: Extract all instance IDs from Datadog
+    - name: Extract instance IDs from Datadog
       set_fact:
-        matched_instances: >-
+        dd_instances: >-
           {{
             dd_check.json.host_list
             | default([])
@@ -73,23 +71,23 @@
             | list
           }}
 
-    - name: Show extracted instances
+    - name: Print extracted instances
       debug:
         msg:
           - "🎯 Current Instance: {{ datadog_host }}"
-          - "📦 Datadog Instances: {{ matched_instances }}"
+          - "📦 Datadog Instances: {{ dd_instances }}"
 
-    - name: Check if current instance exists
+    - name: Check if instance exists
       set_fact:
-        datadog_ok: "{{ datadog_host in matched_instances }}"
+        datadog_ok: "{{ datadog_host in dd_instances }}"
 
     - name: Final Pre-check Decision
       debug:
-        msg: "✅ Pre-check result (TRUE = already reporting): {{ datadog_ok }}"
+        msg: "✅ Pre-check result: {{ datadog_ok }}"
 
 
 #################################################
-# PLAY 3: INSTALL (ONLY IF NEEDED)
+# PLAY 3: INSTALL DATADOG (ONLY IF NEEDED)
 #################################################
 
 - name: Install Datadog
@@ -99,15 +97,15 @@
 
   tasks:
 
-    - name: Decision before install
+    - name: Install decision
       debug:
-        msg: "Install decision: {{ not hostvars['localhost'].datadog_ok }}"
+        msg: "Install required: {{ not hostvars['localhost'].datadog_ok }}"
 
-    - name: Skip install if already reporting
+    - name: Skip if already reporting
       meta: end_play
       when: hostvars['localhost'].datadog_ok
 
-    - name: Install agent
+    - name: Install Datadog agent
       shell: |
         set -e
         apt-get update -y
@@ -117,7 +115,7 @@
         apt-get update -y
         apt-get install -y datadog-agent
 
-    - name: Create config
+    - name: Create config file
       shell: |
         cp -n /etc/datadog-agent/datadog.yaml.example /etc/datadog-agent/datadog.yaml
 
@@ -129,7 +127,7 @@
           site: us5.datadoghq.com
           dd_url: https://app.us5.datadoghq.com
 
-    - name: Restart agent
+    - name: Restart Datadog
       service:
         name: datadog-agent
         state: restarted
@@ -137,27 +135,27 @@
 
 
 #################################################
-# PLAY 4: VERIFY (FULL DEBUG)
+# PLAY 4: VERIFY DATADOG (WITH DEBUG)
 #################################################
 
-- name: Verify Datadog Debug
+- name: Verify Datadog
   hosts: localhost
   gather_facts: no
 
   tasks:
 
-    - name: Skip if already OK
+    - name: Skip verify if already OK
       meta: end_play
       when: datadog_ok
 
-    - name: Wait for Datadog ingest
+    - name: Wait for ingestion
       debug:
-        msg: "⏳ Waiting 120 seconds for Datadog ingestion..."
+        msg: "⏳ Waiting 120 seconds for Datadog..."
 
     - pause:
         seconds: 120
 
-    - name: Retry Datadog check
+    - name: Retry check until found
       uri:
         url: "https://api.us5.datadoghq.com/api/v1/hosts"
         method: GET
@@ -165,7 +163,7 @@
           DD-API-KEY: "{{ datadog_api_key }}"
           DD-APPLICATION-KEY: "{{ datadog_app_key }}"
       register: dd_api
-      retries: 5
+      retries: 10
       delay: 30
       until: datadog_host in (
         dd_api.json.host_list
@@ -176,11 +174,19 @@
       )
       failed_when: false
 
-    - name: Show verify response
+    - name: Show final host list
       debug:
-        var: dd_api.json.host_list
+        msg:
+          - "Returned instances: {{
+              dd_api.json.host_list
+              | default([])
+              | selectattr('meta.aws.instance-id', 'defined')
+              | map(attribute='meta.aws.instance-id')
+              | list
+            }}"
+          - "Target instance: {{ datadog_host }}"
 
-    - name: Final check
+    - name: Final evaluation
       set_fact:
         datadog_ok: >-
           {{
@@ -193,12 +199,13 @@
             )
           }}
 
-    - debug:
-        msg: "✅ Final verification result: {{ datadog_ok }}"
+    - name: Final verification result
+      debug:
+        msg: "✅ Final result: {{ datadog_ok }}"
 
 
 #################################################
-# PLAY 5: RESULT
+# PLAY 5: FINAL RESULT
 #################################################
 
 - name: Final Decision
@@ -207,9 +214,8 @@
 
   tasks:
 
-    - name: Print final result
+    - name: Print final status
       debug:
         msg:
-          - "✅ FINAL RESULT: {{ datadog_ok }}"
-          - "✅ ACTION: {{ 'SUCCESS' if datadog_ok else 'FAILURE' }}"
-
+          - "✅ FINAL STATUS: {{ datadog_ok }}"
+          - "✅ ACTION: {{ 'SUCCESS (CLOSE)' if datadog_ok else 'FAIL (INVESTIGATE)' }}"

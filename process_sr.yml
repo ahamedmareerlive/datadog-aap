@@ -92,13 +92,12 @@
             msg: "No EC2 found"
           when: matched_instances | length == 0
 
-        - name: Set instance details
-          set_fact:
+        - set_fact:
             datadog_host: "{{ matched_instances[0].instance_id }}"
             target_ip: "{{ matched_instances[0].public_ip_address }}"
             ec2_os: "{{ matched_instances[0].tags.OS | default('amzn') | lower }}"
 
-        - name: Set ansible user
+        - name: Set ansible user (TAG BASED)
           set_fact:
             dynamic_user: "{{ 'ubuntu' if ec2_os == 'ubuntu' else 'ec2-user' }}"
 
@@ -125,7 +124,7 @@
 
   tasks:
 
-    - name: Call Datadog API
+    - name: Get Datadog hosts
       uri:
         url: "https://api.us5.datadoghq.com/api/v1/hosts"
         method: GET
@@ -140,67 +139,74 @@
 
 
 #################################################
-# PLAY 3: INSTALL DATADOG (FIXED ✅)
+# PLAY 3: INSTALL DATADOG (MODULE BASED ✅)
 #################################################
 
 - name: Install Datadog
   hosts: dynamic_targets
   become: yes
-  gather_facts: no
+  gather_facts: yes
 
   tasks:
 
     - meta: end_play
       when: hostvars['localhost'].datadog_ok or hostvars['localhost'].global_failed
 
-    - name: Install Datadog agent (ALL LINUX ✅)
-      shell: |
-        set -e
+    #################################################
+    # ✅ UBUNTU / DEBIAN
+    #################################################
 
-        if [ -f /etc/os-release ]; then
-          . /etc/os-release
-        fi
+    - name: Install dependencies (Debian)
+      apt:
+        name: apt-transport-https
+        state: present
+      when: ansible_os_family == "Debian"
 
-        echo "Detected OS: $ID"
+    - name: Add Datadog apt repo
+      copy:
+        dest: /etc/apt/sources.list.d/datadog.list
+        content: "deb https://apt.datadoghq.com/ stable 7"
+      when: ansible_os_family == "Debian"
 
-        #################################################
-        # UBUNTU / DEBIAN
-        #################################################
-        if [[ "$ID" == "ubuntu" || "$ID" == "debian" ]]; then
-          apt-get update -y
-          apt-get install -y curl apt-transport-https
+    - name: Install Datadog (Debian)
+      apt:
+        name: datadog-agent
+        update_cache: yes
+        state: present
+      when: ansible_os_family == "Debian"
 
-          curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public | \
-          gpg --dearmor -o /usr/share/keyrings/datadog.gpg
+    #################################################
+    # ✅ RHEL/CENTOS/AMAZON
+    #################################################
 
-          echo "deb [signed-by=/usr/share/keyrings/datadog.gpg] https://apt.datadoghq.com/ stable 7" > \
-          /etc/apt/sources.list.d/datadog.list
+    - name: Add Datadog yum repo
+      copy:
+        dest: /etc/yum.repos.d/datadog.repo
+        content: |
+          [datadog]
+          name=Datadog
+          baseurl=https://yum.datadoghq.com/stable/7/x86_64/
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://keys.datadoghq.com/DATADOG_RPM_KEY_CURRENT.public
+      when: ansible_os_family == "RedHat"
 
-          apt-get update -y
-          apt-get install -y datadog-agent
+    - name: Install Datadog (RPM based)
+      yum:
+        name: datadog-agent
+        state: present
+      when: ansible_os_family == "RedHat"
 
-        #################################################
-        # RHEL/CENTOS/AMZN
-        #################################################
-        else
-          yum install -y curl
+    #################################################
+    # CONFIG
+    #################################################
 
-          cat <<EOF > /etc/yum.repos.d/datadog.repo
-[datadog]
-name=Datadog
-baseurl=https://yum.datadoghq.com/stable/7/x86_64/
-enabled=1
-gpgcheck=1
-gpgkey=https://keys.datadoghq.com/DATADOG_RPM_KEY_CURRENT.public
-EOF
-
-          yum install -y datadog-agent
-        fi
-
-    - name: Ensure config exists
-      command: cp /etc/datadog-agent/datadog.yaml.example /etc/datadog-agent/datadog.yaml
-      args:
-        creates: /etc/datadog-agent/datadog.yaml
+    - name: Ensure config file
+      copy:
+        src: /etc/datadog-agent/datadog.yaml.example
+        dest: /etc/datadog-agent/datadog.yaml
+        remote_src: yes
+        force: no
 
     - name: Configure Datadog
       blockinfile:
@@ -209,10 +215,11 @@ EOF
           api_key: {{ datadog_api_key }}
           site: us5.datadoghq.com
 
-    - name: Restart agent
+    - name: Restart service
       service:
         name: datadog-agent
         state: restarted
+        enabled: yes
 
 
 #################################################
@@ -228,7 +235,7 @@ EOF
     - pause:
         seconds: 180
 
-    - name: Retry until appears
+    - name: Retry until visible
       uri:
         url: "https://api.us5.datadoghq.com/api/v1/hosts"
         method: GET
@@ -308,7 +315,7 @@ EOF
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
         body_format: json
-        status_code: [200,201]
+        status_code: [200, 201]
         body:
           short_description: "Datadog automation failed"
           description: "{{ error_message }}"

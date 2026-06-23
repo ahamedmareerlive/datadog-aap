@@ -82,12 +82,10 @@
             groups: dynamic_targets
 
       rescue:
-
         - name: Capture Play1 error
           set_fact:
             global_failed: true
             error_message: "{{ ansible_failed_result.msg | default('Play1 failure') }}"
-
 
 #################################################
 # PLAY 2: INSTALL DATADOG
@@ -137,7 +135,6 @@
             enabled: yes
 
       rescue:
-
         - name: Capture install failure
           set_fact:
             datadog_ok: false
@@ -148,10 +145,6 @@
                 | default(ansible_failed_result.stderr, true)
                 | default('Installation failure')
               }}
-
-        - debug:
-            msg: "❌ Installation failed but continuing"
-
 
 #################################################
 # PLAY 3: VERIFY DATADOG
@@ -179,20 +172,18 @@
           set_fact:
             datadog_ok: "{{ (dd_api.json.host_list | default([])) | length > 0 }}"
 
-        - name: Mark failure if not found
+        - name: Mark failure if not reporting
           when: not datadog_ok
           set_fact:
             global_failed: true
             error_message: "Host not reporting in Datadog"
 
       rescue:
-
         - name: Capture API failure
           set_fact:
             global_failed: true
             datadog_ok: false
             error_message: "Datadog API failure"
-
 
 #################################################
 # PLAY 4: SUCCESS HANDLING
@@ -227,7 +218,6 @@
         body:
           state: "3"
 
-
 #################################################
 # PLAY 5: FAILURE HANDLING + INCIDENT
 #################################################
@@ -238,36 +228,9 @@
 
   vars:
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
+    helpdesk_group_id: "679434f053231300e321ddeeff7b12d8"
 
   tasks:
-
-    - name: Get Help Desk group sys_id
-      uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sys_user_group?sysparm_query=nameLIKEHelp Desk"
-        method: GET
-        user: "{{ snow_user }}"
-        password: "{{ snow_password }}"
-        force_basic_auth: yes
-      register: group_data
-      failed_when: false
-
-    - name: Debug group API response
-      debug:
-        var: group_data
-
-    - name: Safely extract group sys_id
-      set_fact:
-        helpdesk_group_id: >-
-          {{
-            (group_data.json.result[0].sys_id)
-            if (
-              group_data is defined and
-              group_data.json is defined and
-              group_data.json.result is defined and
-              (group_data.json.result | length > 0)
-            )
-            else ''
-          }}
 
     - name: Create Incident
       when: global_failed or not datadog_ok
@@ -287,7 +250,7 @@
 
             ERROR:
             {{ error_message }}
-          assignment_group: "{{ helpdesk_group_id if helpdesk_group_id != '' else omit }}"
+          assignment_group: "{{ helpdesk_group_id }}"
           urgency: "2"
           impact: "2"
 
@@ -302,4 +265,3 @@
         body:
           state: "-5"
           work_notes: "❌ Failed: {{ error_message }}"
-

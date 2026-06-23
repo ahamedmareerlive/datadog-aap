@@ -1,6 +1,6 @@
 ---
 #################################################
-# PLAY 1: FETCH LATEST RITM + CORRECT HOST
+# PLAY 1: GET LATEST RITM + CORRECT HOST
 #################################################
 
 - name: Get latest RITM and correct host
@@ -29,26 +29,23 @@
         force_basic_auth: yes
       register: sn
 
-    - name: Validate RITM exists
-      fail:
+    - fail:
         msg: "❌ No RITM found"
       when: sn.json.result | length == 0
 
-    - name: Debug RITM
-      debug:
+    - debug:
         msg:
           - "✅ RITM: {{ sn.json.result[0].number }}"
           - "✅ Sys ID: {{ sn.json.result[0].sys_id }}"
-          - "✅ Created: {{ sn.json.result[0].sys_created_on }}"
 
     - set_fact:
         request_item_sys_id: "{{ sn.json.result[0].sys_id }}"
 
     #################################################
-    # ✅ FETCH VARIABLE LINKS (STRICT FIX ✅)
+    # ✅ FETCH VARIABLES (STRICT TO SAME RITM)
     #################################################
 
-    - name: Get variables ONLY for this RITM
+    - name: Get variable mappings
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request_item={{ request_item_sys_id }}"
         method: GET
@@ -56,8 +53,7 @@
         password: "{{ snow_password }}"
       register: mtom
 
-    - name: Debug MTOM
-      debug:
+    - debug:
         var: mtom.json.result
 
     #################################################
@@ -73,18 +69,17 @@
       loop: "{{ mtom.json.result }}"
       register: all_vars
 
-    - name: Debug all values
-      debug:
+    - debug:
         msg:
           - "Value: {{ item.json.result.value }}"
           - "Created: {{ item.json.result.sys_created_on }}"
       loop: "{{ all_vars.results }}"
 
     #################################################
-    # ✅ SELECT CORRECT VALUE (KEY FIX ✅)
+    # ✅ PICK CORRECT VALUE (LATEST ENTRY)
     #################################################
 
-    - name: Pick value ONLY from THIS RITM (latest)
+    - name: Select correct host value
       set_fact:
         target_host: >-
           {{
@@ -94,32 +89,38 @@
             | last
           }}
 
-    - name: Confirm correct host
-      debug:
+    - debug:
         msg: "✅ FINAL HOST FROM RITM: {{ target_host }}"
 
     #################################################
-    # ✅ AWS LOOKUP
+    # ✅ AWS LOOKUP (FLEXIBLE MATCH ✅)
     #################################################
 
-    - name: Get EC2 instance
+    - name: Get all EC2 instances
       amazon.aws.ec2_instance_info:
         region: "{{ aws_region }}"
-        filters:
-          "tag:Name": "{{ target_host }}"
       register: ec2_info
 
-    - debug:
-        var: ec2_info.instances
+    - name: Find matching instance by Name
+      set_fact:
+        matched_instances: >-
+          {{
+            ec2_info.instances
+            | selectattr('tags.Name', 'defined')
+            | selectattr('tags.Name', 'search', target_host)
+            | list
+          }}
 
-    - name: Ensure instance found
-      fail:
-        msg: "❌ No EC2 found for {{ target_host }}"
-      when: ec2_info.instances | length == 0
+    - debug:
+        var: matched_instances
+
+    - fail:
+        msg: "❌ No EC2 found matching {{ target_host }}"
+      when: matched_instances | length == 0
 
     - set_fact:
-        datadog_host: "{{ ec2_info.instances[0].instance_id }}"
-        target_ip: "{{ ec2_info.instances[0].public_ip_address }}"
+        datadog_host: "{{ matched_instances[0].instance_id }}"
+        target_ip: "{{ matched_instances[0].public_ip_address }}"
 
     - debug:
         msg:
@@ -175,7 +176,7 @@
 
 
 #################################################
-# PLAY 3: INSTALL
+# PLAY 3: INSTALL DATADOG (FIXED ✅)
 #################################################
 
 - name: Install Datadog if needed
@@ -191,15 +192,25 @@
     - meta: end_play
       when: hostvars['localhost'].datadog_ok
 
-    - name: Install agent
+    - name: Install Datadog Agent
       shell: |
         set -e
         apt-get update -y
         apt-get install -y curl apt-transport-https
-        curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public | gpg --dearmor -o /usr/share/keyrings/datadog.gpg
-        echo "deb [signed-by=/usr/share/keyrings/datadog.gpg] https://apt.datadoghq.com/ stable 7" > /etc/apt/sources.list.d/datadog.list
+
+        curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public | \
+        gpg --dearmor -o /usr/share/keyrings/datadog.gpg
+
+        echo "deb [signed-by=/usr/share/keyrings/datadog.gpg] https://apt.datadoghq.com/ stable 7" > \
+        /etc/apt/sources.list.d/datadog.list
+
         apt-get update -y
         apt-get install -y datadog-agent
+
+    - name: Ensure config exists
+      command: cp /etc/datadog-agent/datadog.yaml.example /etc/datadog-agent/datadog.yaml
+      args:
+        creates: /etc/datadog-agent/datadog.yaml
 
     - name: Configure Datadog
       blockinfile:
@@ -209,7 +220,7 @@
           site: us5.datadoghq.com
           dd_url: https://app.us5.datadoghq.com
 
-    - name: Restart agent
+    - name: Restart Datadog
       service:
         name: datadog-agent
         state: restarted
@@ -217,7 +228,7 @@
 
 
 #################################################
-# PLAY 4: VERIFY
+# PLAY 4: VERIFY DATADOG
 #################################################
 
 - name: Verify Datadog
@@ -229,7 +240,8 @@
     - meta: end_play
       when: datadog_ok
 
-    - pause:
+    - name: Wait for ingestion
+      pause:
         seconds: 120
 
     - name: Verify again

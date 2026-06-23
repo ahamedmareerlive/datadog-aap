@@ -1,6 +1,7 @@
 ---
 #################################################
-# PLAY ## PLAY 1: FETCH RITM + HOST
+# PLAY 1: FETCH RITM + HOST
+#################################################
 
 - name: Fetch latest RITM and host
   hosts: localhost
@@ -136,13 +137,17 @@
 
 
 #################################################
-# PLAY 3: INSTALL WITH ERROR HANDLING ✅
+# PLAY 3: INSTALL WITH ERROR HANDLING
 #################################################
 
 - name: Install Datadog
   hosts: dynamic_targets
   become: yes
   gather_facts: yes
+
+  vars:
+    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
+    helpdesk_group_id: "679434f053231300e321ddeeff7b12d8"
 
   tasks:
 
@@ -180,7 +185,7 @@
               deb [signed-by=/usr/share/keyrings/datadog-archive-keyring.gpg] https://apt.datadoghq.com/ stable 7
           when: ansible_os_family == "Debian"
 
-        - name: Install agent
+        - name: Install datadog
           apt:
             name: datadog-agent
             update_cache: yes
@@ -203,7 +208,7 @@
               gpgkey=https://keys.datadoghq.com/DATADOG_RPM_KEY_CURRENT.public
           when: ansible_os_family == "RedHat"
 
-        - name: Install agent
+        - name: Install datadog
           yum:
             name: datadog-agent
             state: present
@@ -213,7 +218,7 @@
         # CONFIG
         #################################################
 
-        - name: Ensure config file
+        - name: Ensure config
           copy:
             src: /etc/datadog-agent/datadog.yaml.example
             dest: /etc/datadog-agent/datadog.yaml
@@ -234,7 +239,7 @@
             enabled: yes
 
       #################################################
-      # FAILURE HANDLING ✅
+      # ERROR HANDLING
       #################################################
 
       rescue:
@@ -243,16 +248,13 @@
             global_failed: true
             error_message: "{{ ansible_failed_result.msg | default('Unknown error') }}"
 
-        - debug:
-            var: error_message
-
-        - name: Update RITM
+        - name: Update RITM on failure
           delegate_to: localhost
           uri:
-            url: "https://{{ hostvars['localhost'].servicenow_instance }}/api/now/table/sc_req_item/{{ hostvars['localhost'].request_item_sys_id }}"
+            url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ hostvars['localhost'].request_item_sys_id }}"
             method: PATCH
-            user: "{{ hostvars['localhost'].snow_user }}"
-            password: "{{ hostvars['localhost'].snow_password }}"
+            user: "{{ snow_user }}"
+            password: "{{ snow_password }}"
             force_basic_auth: yes
             body_format: json
             body:
@@ -262,10 +264,10 @@
         - name: Create incident
           delegate_to: localhost
           uri:
-            url: "https://{{ hostvars['localhost'].servicenow_instance }}/api/now/table/incident"
+            url: "https://{{ servicenow_instance }}/api/now/table/incident"
             method: POST
-            user: "{{ hostvars['localhost'].snow_user }}"
-            password: "{{ hostvars['localhost'].snow_password }}"
+            user: "{{ snow_user }}"
+            password: "{{ snow_password }}"
             force_basic_auth: yes
             body_format: json
             status_code: [200,201]
@@ -273,7 +275,7 @@
               short_description: "Datadog install failed"
               description: "{{ error_message }}"
               assignment_group:
-                value: "{{ hostvars['localhost'].helpdesk_group_id }}"
+                value: "{{ helpdesk_group_id }}"
 
         - meta: end_play
 

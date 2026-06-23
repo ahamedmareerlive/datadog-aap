@@ -1,9 +1,9 @@
 ---
 #################################################
-# PLAY 1: GET SERVICE NOW + EC2 INSTANCE
+# PLAY 1: GET LATEST SR + TARGET HOST
 #################################################
 
-- name: Get details from ServiceNow and AWS
+- name: Get latest SR and EC2 details
   hosts: localhost
   gather_facts: no
 
@@ -15,22 +15,33 @@
 
     - set_fact:
         datadog_ok: false
-        global_failed: false
 
     #################################################
-    # ✅ GET SR
+    # ✅ FETCH ONLY LATEST SR
     #################################################
 
-    - name: Get SR
+    - name: Get latest SR (ONLY latest)
       uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_limit=1"
+        url: >-
+          https://{{ servicenow_instance }}/api/now/table/sc_req_item?
+          sysparm_query=active=true^stateIN1,2
+          &sysparm_order_by_desc=sys_created_on
+          &sysparm_limit=1
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
+        force_basic_auth: yes
       register: sn
 
+    - name: Validate SR exists
+      fail:
+        msg: "No active SR found"
+      when: sn.json.result | length == 0
+
     - debug:
-        var: sn.json.result
+        msg:
+          - "Latest RITM: {{ sn.json.result[0].sys_id }}"
+          - "Created: {{ sn.json.result[0].sys_created_on }}"
 
     - set_fact:
         request_item_sys_id: "{{ sn.json.result[0].sys_id }}"
@@ -39,7 +50,7 @@
     # ✅ GET VARIABLES
     #################################################
 
-    - name: Get variables (MTOM)
+    - name: Get variables
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?request={{ request_item_sys_id }}"
         method: GET
@@ -54,10 +65,10 @@
         option_sys_id: "{{ mtom.json.result[-1].sc_item_option.value }}"
 
     #################################################
-    # ✅ GET TARGET HOST
+    # ✅ GET HOST VALUE
     #################################################
 
-    - name: Get ServiceNow variable value
+    - name: Get variable value
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
         method: GET
@@ -65,21 +76,17 @@
         password: "{{ snow_password }}"
       register: opt
 
-    - name: DEBUG ServiceNow raw value
-      debug:
+    - debug:
         var: opt.json
 
-    - name: Extract target host
-      set_fact:
+    - set_fact:
         target_host: "{{ opt.json.result.value }}"
 
-    - name: Confirm target host
-      debug:
-        msg:
-          - "✅ Extracted target_host: {{ target_host }}"
+    - debug:
+        msg: "✅ Target host from SN: {{ target_host }}"
 
     #################################################
-    # ✅ AWS LOOKUP (FIXED ✅)
+    # ✅ AWS LOOKUP (FIXED)
     #################################################
 
     - name: Get EC2 instance using Name tag
@@ -89,28 +96,24 @@
           "tag:Name": "{{ target_host }}"
       register: ec2_info
 
-    - name: DEBUG EC2 result
-      debug:
+    - debug:
         var: ec2_info.instances
 
     - name: Ensure instance found
       fail:
-        msg: "❌ No EC2 instance found for {{ target_host }}"
+        msg: "No EC2 found for {{ target_host }}"
       when: ec2_info.instances | length == 0
 
-    - name: Set instance details
-      set_fact:
+    - set_fact:
         datadog_host: "{{ ec2_info.instances[0].instance_id }}"
         target_ip: "{{ ec2_info.instances[0].public_ip_address }}"
 
-    - name: Confirm correct instance
-      debug:
+    - debug:
         msg:
           - "✅ Instance ID: {{ datadog_host }}"
           - "✅ Public IP: {{ target_ip }}"
 
-    - name: Add dynamic host
-      add_host:
+    - add_host:
         name: dynamic_target
         ansible_host: "{{ target_ip }}"
         ansible_user: ubuntu
@@ -137,7 +140,7 @@
       register: dd_check
       failed_when: false
 
-    - name: Extract instance IDs from Datadog
+    - name: Extract instance list
       set_fact:
         dd_instances: >-
           {{
@@ -149,11 +152,10 @@
 
     - debug:
         msg:
-          - "📦 Datadog instances: {{ dd_instances }}"
-          - "🎯 Target instance: {{ datadog_host }}"
+          - "Datadog instances: {{ dd_instances }}"
+          - "Target instance: {{ datadog_host }}"
 
-    - name: Check if already reporting
-      set_fact:
+    - set_fact:
         datadog_ok: "{{ datadog_host in dd_instances }}"
 
     - debug:
@@ -161,7 +163,7 @@
 
 
 #################################################
-# PLAY 3: INSTALL DATADOG
+# PLAY 3: INSTALL
 #################################################
 
 - name: Install Datadog
@@ -219,9 +221,6 @@
     - meta: end_play
       when: datadog_ok
 
-    - debug:
-        msg: "⏳ Waiting 120 seconds for Datadog ingestion..."
-
     - pause:
         seconds: 120
 
@@ -238,8 +237,7 @@
       until: dd_api.status == 200
       failed_when: false
 
-    - name: Extract instance list again
-      set_fact:
+    - set_fact:
         dd_instances: >-
           {{
             dd_api.json.host_list | default([])
@@ -250,8 +248,8 @@
 
     - debug:
         msg:
-          - "📦 After install Datadog instances: {{ dd_instances }}"
-          - "🎯 Target instance: {{ datadog_host }}"
+          - "After install: {{ dd_instances }}"
+          - "Target: {{ datadog_host }}"
 
     - set_fact:
         datadog_ok: "{{ datadog_host in dd_instances }}"

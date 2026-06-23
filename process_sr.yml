@@ -19,10 +19,6 @@
         global_failed: false
         error_message: ""
 
-    #################################################
-    # ✅ FETCH LATEST RITM
-    #################################################
-
     - name: Get latest RITM
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=active=true^stateIN1,2^ORDERBYDESCsys_created_on&sysparm_limit=1"
@@ -41,7 +37,7 @@
         request_sys_id: "{{ sn.json.result[0].request.value }}"
 
     #################################################
-    # ✅ GET VARIABLE
+    # GET HOST FROM RITM
     #################################################
 
     - name: Get variable mapping
@@ -72,7 +68,7 @@
           }}
 
     #################################################
-    # ✅ AWS LOOKUP + ADD HOST
+    # AWS LOOKUP
     #################################################
 
     - block:
@@ -123,7 +119,7 @@
 
   tasks:
 
-    - name: Get Datadog hosts
+    - name: Call Datadog API
       uri:
         url: "https://api.us5.datadoghq.com/api/v1/hosts"
         method: GET
@@ -133,14 +129,28 @@
       register: dd_check
       failed_when: false
 
+    #################################################
+    # ✅ CHECK INSTANCE-ID OR HOSTNAME
+    #################################################
+
     - set_fact:
         datadog_ok: >-
           {{
-            datadog_host in (
-              dd_check.json.host_list | default([])
-              | selectattr('meta.aws.instance-id', 'defined')
-              | map(attribute='meta.aws.instance-id')
-              | list
+            (
+              datadog_host in (
+                dd_check.json.host_list | default([])
+                | selectattr('meta.aws.instance-id', 'defined')
+                | map(attribute='meta.aws.instance-id')
+                | list
+              )
+            )
+            or
+            (
+              datadog_host in (
+                dd_check.json.host_list | default([])
+                | map(attribute='host_name')
+                | list
+              )
             )
           }}
 
@@ -189,7 +199,7 @@
 
 
 #################################################
-# PLAY 4: VERIFY (FIXED ✅)
+# PLAY 4: VERIFY (FINAL FIX ✅)
 #################################################
 
 - name: Verify Datadog
@@ -204,7 +214,7 @@
     - pause:
         seconds: 180
 
-    - name: Retry until visible in Datadog
+    - name: Retry until appears
       uri:
         url: "https://api.us5.datadoghq.com/api/v1/hosts"
         method: GET
@@ -215,22 +225,42 @@
       retries: 12
       delay: 30
       until: >
-        datadog_host in (
-          dd_api.json.host_list | default([])
-          | selectattr('meta.aws.instance-id', 'defined')
-          | map(attribute='meta.aws.instance-id')
-          | list
+        (
+          datadog_host in (
+            dd_api.json.host_list | default([])
+            | selectattr('meta.aws.instance-id', 'defined')
+            | map(attribute='meta.aws.instance-id')
+            | list
+          )
+        )
+        or
+        (
+          datadog_host in (
+            dd_api.json.host_list | default([])
+            | map(attribute='host_name')
+            | list
+          )
         )
       failed_when: false
 
     - set_fact:
         datadog_ok: >-
           {{
-            datadog_host in (
-              dd_api.json.host_list | default([])
-              | selectattr('meta.aws.instance-id', 'defined')
-              | map(attribute='meta.aws.instance-id')
-              | list
+            (
+              datadog_host in (
+                dd_api.json.host_list | default([])
+                | selectattr('meta.aws.instance-id', 'defined')
+                | map(attribute='meta.aws.instance-id')
+                | list
+              )
+            )
+            or
+            (
+              datadog_host in (
+                dd_api.json.host_list | default([])
+                | map(attribute='host_name')
+                | list
+              )
             )
           }}
 
@@ -255,10 +285,6 @@
 
   tasks:
 
-    #################################################
-    # ✅ SUCCESS
-    #################################################
-
     - name: Close RITM
       when: datadog_ok and not global_failed
       uri:
@@ -269,7 +295,7 @@
         body_format: json
         body:
           state: "3"
-          work_notes: "✅ Datadog installed and verified"
+          work_notes: "Datadog installed and verified"
 
     - name: Close Request
       when: datadog_ok and not global_failed
@@ -282,11 +308,7 @@
         body:
           state: "3"
 
-    #################################################
-    # ❌ FAILURE
-    #################################################
-
-    - name: Update RITM failure
+    - name: Failure update
       when: global_failed or not datadog_ok
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
@@ -296,9 +318,9 @@
         body_format: json
         body:
           state: "-5"
-          work_notes: "❌ Failed: {{ error_message }}"
+          work_notes: "Failed: {{ error_message }}"
 
-    - name: Create Incident
+    - name: Create incident
       when: global_failed or not datadog_ok
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/incident"
@@ -312,4 +334,3 @@
           description: "{{ error_message }}"
           assignment_group:
             value: "{{ helpdesk_group_id }}"
-

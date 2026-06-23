@@ -27,6 +27,7 @@
             method: GET
             user: "{{ snow_user }}"
             password: "{{ snow_password }}"
+            force_basic_auth: yes
           register: sn
 
         - fail:
@@ -37,7 +38,7 @@
             request_item_sys_id: "{{ sn.json.result[0].sys_id }}"
             request_sys_id: "{{ sn.json.result[0].request.value }}"
 
-        - name: Get host
+        - name: Get variables
           uri:
             url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request={{ request_item_sys_id }}"
             method: GET
@@ -46,9 +47,9 @@
           register: mtom
 
         - set_fact:
-            option_sys_id: "{{ mtom.json.result[-1].sc_item_option.value }}"
+            option_sys_id: "{{ (mtom.json.result | sort(attribute='sys_created_on'))[-1].sc_item_option.value }}"
 
-        - name: Fetch hostname
+        - name: Get target host
           uri:
             url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
             method: GET
@@ -66,11 +67,16 @@
               "tag:Name": "{{ target_host }}"
           register: ec2_info
 
+        - fail:
+            msg: "No EC2 found"
+          when: ec2_info.instances | length == 0
+
         - set_fact:
             datadog_host: "{{ ec2_info.instances[0].instance_id }}"
             target_ip: "{{ ec2_info.instances[0].public_ip_address }}"
 
-        - add_host:
+        - name: Add host
+          add_host:
             name: dynamic_target
             ansible_host: "{{ target_ip }}"
             ansible_user: ubuntu
@@ -82,16 +88,16 @@
             error_message: "Play1 failure"
 
 #################################################
-# PLAY 2: PRE-CHECK (DATADOG BEFORE INSTALL)
+# PLAY 2: PRE-CHECK (EXACT MATCH ✅)
 #################################################
 
-- name: Pre-check Datadog (skip install if already reporting)
+- name: Check Datadog before install
   hosts: localhost
   gather_facts: no
 
   tasks:
 
-    - name: Check Datadog API first
+    - name: Call Datadog API
       uri:
         url: "https://api.us5.datadoghq.com/api/v1/hosts?filter={{ datadog_host }}"
         method: GET
@@ -101,16 +107,29 @@
       register: dd_check
       failed_when: false
 
-    - set_fact:
-        datadog_ok: "{{ (dd_check.json.host_list | default([])) | length > 0 }}"
+    #################################################
+    # ✅ EXACT MATCH FIX (NO FALSE POSITIVE)
+    #################################################
 
-    - name: If already reporting, stop installation path
-      debug:
-        msg: "✅ Host already reporting in Datadog — skipping install"
-      when: datadog_ok
+    - name: Validate exact instance match
+      set_fact:
+        datadog_ok: >-
+          {{
+            dd_check.json.host_list
+            | default([])
+            | selectattr('host_name','equalto',datadog_host)
+            | list
+            | length > 0
+          }}
+
+    - debug:
+        msg:
+          - "Instance ID: {{ datadog_host }}"
+          - "Matched Hosts: {{ dd_check.json.host_list | default([]) | map(attribute='host_name') | list }}"
+          - "Datadog OK: {{ datadog_ok }}"
 
 #################################################
-# PLAY 3: INSTALL DATADOG (ONLY IF NEEDED)
+# PLAY 3: INSTALL DATADOG (ONLY IF NOT PRESENT)
 #################################################
 
 - name: Install Datadog
@@ -120,7 +139,7 @@
 
   tasks:
 
-    - name: Skip if already reporting
+    - name: Skip install if already reporting
       meta: end_play
       when: hostvars['localhost'].datadog_ok
 
@@ -136,7 +155,7 @@
             apt-get update -y
             apt-get install -y datadog-agent
 
-        - name: Create config
+        - name: Create config file
           shell: |
             cp -n /etc/datadog-agent/datadog.yaml.example /etc/datadog-agent/datadog.yaml
 
@@ -146,7 +165,7 @@
             regexp: '^api_key:.*'
             replace: 'api_key: {{ datadog_api_key }}'
 
-        - name: Restart
+        - name: Restart Datadog
           service:
             name: datadog-agent
             state: restarted
@@ -155,10 +174,10 @@
       rescue:
         - set_fact:
             global_failed: true
-            error_message: "Install failed"
+            error_message: "Installation failed"
 
 #################################################
-# PLAY 4: VERIFY AFTER INSTALL (ONLY IF INSTALLED)
+# PLAY 4: VERIFY AFTER INSTALL
 #################################################
 
 - name: Verify Datadog
@@ -167,26 +186,35 @@
 
   tasks:
 
-    - name: Skip verify if already OK
-      meta: end_play
+    - meta: end_play
       when: datadog_ok or global_failed
 
     - pause:
         seconds: 60
 
-    - name: Check Datadog again
+    - name: Retry Datadog check
       uri:
         url: "https://api.us5.datadoghq.com/api/v1/hosts?filter={{ datadog_host }}"
+        method: GET
+        headers:
+          DD-API-KEY: "{{ datadog_api_key }}"
+          DD-APPLICATION-KEY: "{{ datadog_app_key }}"
       register: dd_api
       retries: 5
       delay: 20
-      until: dd_api.json.host_list | length > 0
+      until: >
+        (
+          dd_api.json.host_list
+          | selectattr('host_name','equalto',datadog_host)
+          | list
+          | length
+        ) > 0
       failed_when: false
 
     - set_fact:
-        datadog_ok: "{{ (dd_api.json.host_list | default([])) | length > 0 }}"
+        datadog_ok: true
 
-    - name: Mark failure if still not reporting
+    - name: Mark failure
       when: not datadog_ok
       set_fact:
         global_failed: true
@@ -215,7 +243,7 @@
         body_format: json
         body:
           state: "3"
-          work_notes: "✅ Datadog already present or installed successfully"
+          work_notes: "✅ Datadog verified / installed"
 
     - name: Close Request
       when: datadog_ok and not global_failed
@@ -232,7 +260,7 @@
 # PLAY 6: FAILURE
 #################################################
 
-- name: Failure Handling
+- name: Failure
   hosts: localhost
   gather_facts: no
 
@@ -264,7 +292,7 @@
         body_format: json
         status_code: [200,201]
         body:
-          short_description: "Datadog failure"
+          short_description: "Datadog Failure"
           description: "{{ error_message }}"
           assignment_group:
             value: "{{ helpdesk_group_id }}"

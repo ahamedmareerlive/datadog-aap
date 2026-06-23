@@ -1,7 +1,6 @@
 ---
 #################################################
-# PLAY 1: FETCH RITM + HOST
-#################################################
+# PLAY ## PLAY 1: FETCH RITM + HOST
 
 - name: Fetch latest RITM and host
   hosts: localhost
@@ -18,10 +17,6 @@
         datadog_ok: false
         global_failed: false
         error_message: ""
-
-    #################################################
-    # ✅ GET LATEST RITM
-    #################################################
 
     - name: Get latest RITM
       uri:
@@ -41,7 +36,7 @@
         request_sys_id: "{{ sn.json.result[0].request.value }}"
 
     #################################################
-    # ✅ GET VARIABLES
+    # GET VARIABLES
     #################################################
 
     - name: Get MTOM mapping
@@ -74,7 +69,7 @@
           }}
 
     #################################################
-    # ✅ AWS LOOKUP
+    # AWS LOOKUP
     #################################################
 
     - name: Get EC2 instances
@@ -96,23 +91,17 @@
         msg: "No EC2 found"
       when: matched_instances | length == 0
 
-    - name: Set instance details
-      set_fact:
+    - set_fact:
         datadog_host: "{{ matched_instances[0].instance_id }}"
         target_ip: "{{ matched_instances[0].public_ip_address }}"
         ec2_os: "{{ matched_instances[0].tags.OS | default('amzn') | lower }}"
 
     #################################################
-    # ✅ TAG BASED USER
+    # TAG BASED USER
     #################################################
 
-    - name: Set ansible user
-      set_fact:
+    - set_fact:
         dynamic_user: "{{ 'ubuntu' if ec2_os == 'ubuntu' else 'ec2-user' }}"
-
-    #################################################
-    # ✅ ADD HOST
-    #################################################
 
     - name: Add dynamic host
       add_host:
@@ -147,7 +136,7 @@
 
 
 #################################################
-# PLAY 3: INSTALL DATADOG
+# PLAY 3: INSTALL WITH ERROR HANDLING ✅
 #################################################
 
 - name: Install Datadog
@@ -160,87 +149,133 @@
     - meta: end_play
       when: hostvars['localhost'].datadog_ok
 
-    #################################################
-    # ✅ DEBIAN / UBUNTU FIXED
-    #################################################
+    - block:
 
-    - name: Install dependencies
-      apt:
-        name:
-          - apt-transport-https
-          - curl
-          - gnupg
-        state: present
-        update_cache: yes
-      when: ansible_os_family == "Debian"
+        #################################################
+        # DEBIAN / UBUNTU
+        #################################################
 
-    - name: Add Datadog GPG key
-      shell: |
-        curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public \
-        | gpg --dearmor -o /usr/share/keyrings/datadog-archive-keyring.gpg
-      args:
-        creates: /usr/share/keyrings/datadog-archive-keyring.gpg
-      when: ansible_os_family == "Debian"
+        - name: Install dependencies
+          apt:
+            name:
+              - apt-transport-https
+              - curl
+              - gnupg
+            state: present
+            update_cache: yes
+          when: ansible_os_family == "Debian"
 
-    - name: Add Datadog repo
-      copy:
-        dest: /etc/apt/sources.list.d/datadog.list
-        content: |
-          deb [signed-by=/usr/share/keyrings/datadog-archive-keyring.gpg] https://apt.datadoghq.com/ stable 7
-      when: ansible_os_family == "Debian"
+        - name: Add Datadog GPG key
+          shell: |
+            curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public \
+            | gpg --dearmor -o /usr/share/keyrings/datadog-archive-keyring.gpg
+          args:
+            creates: /usr/share/keyrings/datadog-archive-keyring.gpg
+          when: ansible_os_family == "Debian"
 
-    - name: Install datadog (Debian)
-      apt:
-        name: datadog-agent
-        update_cache: yes
-        state: present
-      when: ansible_os_family == "Debian"
+        - name: Add repo
+          copy:
+            dest: /etc/apt/sources.list.d/datadog.list
+            content: |
+              deb [signed-by=/usr/share/keyrings/datadog-archive-keyring.gpg] https://apt.datadoghq.com/ stable 7
+          when: ansible_os_family == "Debian"
 
-    #################################################
-    # ✅ RHEL / AMAZON LINUX
-    #################################################
+        - name: Install agent
+          apt:
+            name: datadog-agent
+            update_cache: yes
+            state: present
+          when: ansible_os_family == "Debian"
 
-    - name: Add yum repo
-      copy:
-        dest: /etc/yum.repos.d/datadog.repo
-        content: |
-          [datadog]
-          name=Datadog
-          baseurl=https://yum.datadoghq.com/stable/7/x86_64/
-          enabled=1
-          gpgcheck=1
-          gpgkey=https://keys.datadoghq.com/DATADOG_RPM_KEY_CURRENT.public
-      when: ansible_os_family == "RedHat"
+        #################################################
+        # RHEL / AMAZON
+        #################################################
 
-    - name: Install datadog (RPM)
-      yum:
-        name: datadog-agent
-        state: present
-      when: ansible_os_family == "RedHat"
+        - name: Add yum repo
+          copy:
+            dest: /etc/yum.repos.d/datadog.repo
+            content: |
+              [datadog]
+              name=Datadog
+              baseurl=https://yum.datadoghq.com/stable/7/x86_64/
+              enabled=1
+              gpgcheck=1
+              gpgkey=https://keys.datadoghq.com/DATADOG_RPM_KEY_CURRENT.public
+          when: ansible_os_family == "RedHat"
 
-    #################################################
-    # ✅ CONFIGURATION
-    #################################################
+        - name: Install agent
+          yum:
+            name: datadog-agent
+            state: present
+          when: ansible_os_family == "RedHat"
 
-    - name: Ensure config file
-      copy:
-        src: /etc/datadog-agent/datadog.yaml.example
-        dest: /etc/datadog-agent/datadog.yaml
-        remote_src: yes
-        force: no
+        #################################################
+        # CONFIG
+        #################################################
 
-    - name: Configure Datadog
-      blockinfile:
-        path: /etc/datadog-agent/datadog.yaml
-        block: |
-          api_key: {{ datadog_api_key }}
-          site: us5.datadoghq.com
+        - name: Ensure config file
+          copy:
+            src: /etc/datadog-agent/datadog.yaml.example
+            dest: /etc/datadog-agent/datadog.yaml
+            remote_src: yes
+            force: no
 
-    - name: Restart Datadog
-      service:
-        name: datadog-agent
-        state: restarted
-        enabled: yes
+        - name: Configure Datadog
+          blockinfile:
+            path: /etc/datadog-agent/datadog.yaml
+            block: |
+              api_key: {{ datadog_api_key }}
+              site: us5.datadoghq.com
+
+        - name: Restart service
+          service:
+            name: datadog-agent
+            state: restarted
+            enabled: yes
+
+      #################################################
+      # FAILURE HANDLING ✅
+      #################################################
+
+      rescue:
+
+        - set_fact:
+            global_failed: true
+            error_message: "{{ ansible_failed_result.msg | default('Unknown error') }}"
+
+        - debug:
+            var: error_message
+
+        - name: Update RITM
+          delegate_to: localhost
+          uri:
+            url: "https://{{ hostvars['localhost'].servicenow_instance }}/api/now/table/sc_req_item/{{ hostvars['localhost'].request_item_sys_id }}"
+            method: PATCH
+            user: "{{ hostvars['localhost'].snow_user }}"
+            password: "{{ hostvars['localhost'].snow_password }}"
+            force_basic_auth: yes
+            body_format: json
+            body:
+              state: "-5"
+              work_notes: "❌ Datadog install failed: {{ error_message }}"
+
+        - name: Create incident
+          delegate_to: localhost
+          uri:
+            url: "https://{{ hostvars['localhost'].servicenow_instance }}/api/now/table/incident"
+            method: POST
+            user: "{{ hostvars['localhost'].snow_user }}"
+            password: "{{ hostvars['localhost'].snow_password }}"
+            force_basic_auth: yes
+            body_format: json
+            status_code: [200,201]
+            body:
+              short_description: "Datadog install failed"
+              description: "{{ error_message }}"
+              assignment_group:
+                value: "{{ hostvars['localhost'].helpdesk_group_id }}"
+
+        - meta: end_play
 
 
 #################################################
@@ -256,8 +291,7 @@
     - pause:
         seconds: 180
 
-    - name: Retry until host visible
-      uri:
+    - uri:
         url: "https://api.us5.datadoghq.com/api/v1/hosts"
         method: GET
         headers:
@@ -272,15 +306,9 @@
     - set_fact:
         datadog_ok: "{{ datadog_host in (dd_api.json.host_list | map(attribute='host_name') | list) }}"
 
-    - name: Fail if still not reporting
-      when: not datadog_ok
-      set_fact:
-        global_failed: true
-        error_message: "Datadog not reporting"
-
 
 #################################################
-# PLAY 5: FINAL HANDLING
+# PLAY 5: FINAL
 #################################################
 
 - name: Final Handling
@@ -289,12 +317,11 @@
 
   vars:
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
-    helpdesk_group_id: "679434f053231300e321ddeeff7b12d8"
 
   tasks:
 
     - name: Close RITM
-      when: datadog_ok
+      when: datadog_ok and not global_failed
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
         method: PATCH
@@ -307,7 +334,7 @@
           work_notes: "✅ Datadog installed successfully"
 
     - name: Close Request
-      when: datadog_ok
+      when: datadog_ok and not global_failed
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_request/{{ request_sys_id }}"
         method: PATCH
@@ -317,19 +344,3 @@
         body_format: json
         body:
           state: "3"
-
-    - name: Create incident on failure
-      when: not datadog_ok
-      uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/incident"
-        method: POST
-        user: "{{ snow_user }}"
-        password: "{{ snow_password }}"
-        force_basic_auth: yes
-        body_format: json
-        status_code: [200,201]
-        body:
-          short_description: "Datadog installation failed"
-          description: "{{ error_message }}"
-          assignment_group:
-            value: "{{ helpdesk_group_id }}"

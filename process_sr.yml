@@ -1,23 +1,25 @@
 ---
 #################################################
-# PLAY 1: GET LATEST RITM + CORRECT HOST
+# PLAY 1: FETCH RITM + HOST
 #################################################
 
-- name: Get latest RITM and correct host
+- name: Fetch latest RITM and host
   hosts: localhost
   gather_facts: no
 
   vars:
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
-    aws_region: "ap-south-1"
+    helpdesk_group_id: "679434f053231300e321ddeeff7b12d8"
 
   tasks:
 
     - set_fact:
         datadog_ok: false
+        global_failed: false
+        error_message: ""
 
     #################################################
-    # ✅ FETCH ONLY LATEST RITM
+    # ✅ FETCH LATEST RITM
     #################################################
 
     - name: Get latest RITM
@@ -30,35 +32,34 @@
       register: sn
 
     - fail:
-        msg: "❌ No RITM found"
+        msg: "No RITM found"
       when: sn.json.result | length == 0
-
-    - debug:
-        msg:
-          - "✅ RITM: {{ sn.json.result[0].number }}"
-          - "✅ Sys ID: {{ sn.json.result[0].sys_id }}"
 
     - set_fact:
         request_item_sys_id: "{{ sn.json.result[0].sys_id }}"
+        request_sys_id: "{{ sn.json.result[0].request.value }}"
+
+    - name: Update worknote - picked RITM
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        body_format: json
+        body:
+          work_notes: "Automation started for this RITM"
 
     #################################################
-    # ✅ FETCH VARIABLES (STRICT TO SAME RITM)
+    # ✅ GET VARIABLE VALUE
     #################################################
 
-    - name: Get variable mappings
+    - name: Get MTOM
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request_item={{ request_item_sys_id }}"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
       register: mtom
-
-    - debug:
-        var: mtom.json.result
-
-    #################################################
-    # ✅ FETCH ACTUAL VALUES
-    #################################################
 
     - name: Get variable values
       uri:
@@ -69,17 +70,7 @@
       loop: "{{ mtom.json.result }}"
       register: all_vars
 
-    - debug:
-        msg:
-          - "Value: {{ item.json.result.value }}"
-          - "Created: {{ item.json.result.sys_created_on }}"
-      loop: "{{ all_vars.results }}"
-
-    #################################################
-    # ✅ PICK CORRECT VALUE (LATEST ENTRY)
-    #################################################
-
-    - name: Select correct host value
+    - name: Pick hostname
       set_fact:
         target_host: >-
           {{
@@ -89,53 +80,79 @@
             | last
           }}
 
-    - debug:
-        msg: "✅ FINAL HOST FROM RITM: {{ target_host }}"
-
-    #################################################
-    # ✅ AWS LOOKUP (FLEXIBLE MATCH ✅)
-    #################################################
-
-    - name: Get all EC2 instances
-      amazon.aws.ec2_instance_info:
-        region: "{{ aws_region }}"
-      register: ec2_info
-
-    - name: Find matching instance by Name
-      set_fact:
-        matched_instances: >-
-          {{
-            ec2_info.instances
-            | selectattr('tags.Name', 'defined')
-            | selectattr('tags.Name', 'search', target_host)
-            | list
-          }}
-
-    - debug:
-        var: matched_instances
-
-    - fail:
-        msg: "❌ No EC2 found matching {{ target_host }}"
-      when: matched_instances | length == 0
-
-    - set_fact:
-        datadog_host: "{{ matched_instances[0].instance_id }}"
-        target_ip: "{{ matched_instances[0].public_ip_address }}"
-
-    - debug:
-        msg:
-          - "✅ Instance ID: {{ datadog_host }}"
-          - "✅ IP: {{ target_ip }}"
-
-    - add_host:
-        name: dynamic_target
-        ansible_host: "{{ target_ip }}"
-        ansible_user: ubuntu
-        groups: dynamic_targets
+    - name: Update worknote - host
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        body_format: json
+        body:
+          work_notes: "Target host resolved: {{ target_host }}"
 
 
 #################################################
-# PLAY 2: DATADOG PRE-CHECK
+# PLAY 2: AWS LOOKUP
+#################################################
+
+- name: Find EC2 instance
+  hosts: localhost
+  gather_facts: no
+
+  vars:
+    aws_region: "ap-south-1"
+
+  tasks:
+
+    - block:
+
+        - name: Get all instances
+          amazon.aws.ec2_instance_info:
+            region: "{{ aws_region }}"
+          register: ec2_info
+
+        - name: Match instance
+          set_fact:
+            matched_instances: >-
+              {{
+                ec2_info.instances
+                | selectattr('tags.Name', 'defined')
+                | selectattr('tags.Name', 'search', target_host)
+                | list
+              }}
+
+        - fail:
+            msg: "No EC2 match found"
+          when: matched_instances | length == 0
+
+        - set_fact:
+            datadog_host: "{{ matched_instances[0].instance_id }}"
+            target_ip: "{{ matched_instances[0].public_ip_address }}"
+
+        - name: Update worknote
+          uri:
+            url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
+            method: PATCH
+            user: "{{ snow_user }}"
+            password: "{{ snow_password }}"
+            body_format: json
+            body:
+              work_notes: "Instance found: {{ datadog_host }}"
+
+        - add_host:
+            name: dynamic_target
+            ansible_host: "{{ target_ip }}"
+            ansible_user: ubuntu
+            groups: dynamic_targets
+
+      rescue:
+        - set_fact:
+            global_failed: true
+            error_message: "EC2 lookup failed"
+
+
+#################################################
+# PLAY 3: DATADOG PRECHECK
 #################################################
 
 - name: Datadog Pre-check
@@ -144,91 +161,97 @@
 
   tasks:
 
-    - name: Get Datadog hosts
-      uri:
-        url: "https://api.us5.datadoghq.com/api/v1/hosts"
-        method: GET
-        headers:
-          DD-API-KEY: "{{ datadog_api_key }}"
-          DD-APPLICATION-KEY: "{{ datadog_app_key }}"
-      register: dd_check
-      failed_when: false
+    - block:
 
-    - set_fact:
-        dd_instances: >-
-          {{
-            dd_check.json.host_list | default([])
-            | selectattr('meta.aws.instance-id', 'defined')
-            | map(attribute='meta.aws.instance-id')
-            | list
-          }}
+        - name: Get DD hosts
+          uri:
+            url: "https://api.us5.datadoghq.com/api/v1/hosts"
+            method: GET
+            headers:
+              DD-API-KEY: "{{ datadog_api_key }}"
+              DD-APPLICATION-KEY: "{{ datadog_app_key }}"
+          register: dd_check
 
-    - debug:
-        msg:
-          - "📦 Datadog instances: {{ dd_instances }}"
-          - "🎯 Target instance: {{ datadog_host }}"
+        - set_fact:
+            dd_instances: >-
+              {{
+                dd_check.json.host_list | default([])
+                | selectattr('meta.aws.instance-id', 'defined')
+                | map(attribute='meta.aws.instance-id')
+                | list
+              }}
 
-    - set_fact:
-        datadog_ok: "{{ datadog_host in dd_instances }}"
+        - set_fact:
+            datadog_ok: "{{ datadog_host in dd_instances }}"
 
-    - debug:
-        msg: "✅ Pre-check result: {{ datadog_ok }}"
+        - name: Update worknote
+          uri:
+            url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
+            method: PATCH
+            user: "{{ snow_user }}"
+            password: "{{ snow_password }}"
+            body_format: json
+            body:
+              work_notes: "Pre-check Datadog: {{ datadog_ok }}"
+
+      rescue:
+        - set_fact:
+            global_failed: true
+            error_message: "Datadog API failed"
 
 
 #################################################
-# PLAY 3: INSTALL DATADOG (FIXED ✅)
+# PLAY 4: INSTALL DATADOG
 #################################################
 
-- name: Install Datadog if needed
+- name: Install Datadog
   hosts: dynamic_targets
   become: yes
   gather_facts: no
 
   tasks:
 
-    - debug:
-        msg: "Install required: {{ not hostvars['localhost'].datadog_ok }}"
-
     - meta: end_play
       when: hostvars['localhost'].datadog_ok
 
-    - name: Install Datadog Agent
-      shell: |
-        set -e
-        apt-get update -y
-        apt-get install -y curl apt-transport-https
+    - block:
 
-        curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public | \
-        gpg --dearmor -o /usr/share/keyrings/datadog.gpg
+        - name: Install agent
+          shell: |
+            set -e
+            apt-get update -y
+            apt-get install -y curl apt-transport-https
+            curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public | gpg --dearmor -o /usr/share/keyrings/datadog.gpg
+            echo "deb [signed-by=/usr/share/keyrings/datadog.gpg] https://apt.datadoghq.com/ stable 7" > /etc/apt/sources.list.d/datadog.list
+            apt-get update -y
+            apt-get install -y datadog-agent
 
-        echo "deb [signed-by=/usr/share/keyrings/datadog.gpg] https://apt.datadoghq.com/ stable 7" > \
-        /etc/apt/sources.list.d/datadog.list
+        - name: Ensure config
+          command: cp /etc/datadog-agent/datadog.yaml.example /etc/datadog-agent/datadog.yaml
+          args:
+            creates: /etc/datadog-agent/datadog.yaml
 
-        apt-get update -y
-        apt-get install -y datadog-agent
+        - name: Configure
+          blockinfile:
+            path: /etc/datadog-agent/datadog.yaml
+            block: |
+              api_key: {{ datadog_api_key }}
+              site: us5.datadoghq.com
+              dd_url: https://app.us5.datadoghq.com
 
-    - name: Ensure config exists
-      command: cp /etc/datadog-agent/datadog.yaml.example /etc/datadog-agent/datadog.yaml
-      args:
-        creates: /etc/datadog-agent/datadog.yaml
+        - name: Restart
+          service:
+            name: datadog-agent
+            state: restarted
 
-    - name: Configure Datadog
-      blockinfile:
-        path: /etc/datadog-agent/datadog.yaml
-        block: |
-          api_key: {{ datadog_api_key }}
-          site: us5.datadoghq.com
-          dd_url: https://app.us5.datadoghq.com
-
-    - name: Restart Datadog
-      service:
-        name: datadog-agent
-        state: restarted
-        enabled: yes
+      rescue:
+        - set_fact:
+            global_failed: true
+            error_message: "Datadog install failed"
 
 
 #################################################
-# PLAY 4: VERIFY DATADOG
+# PLAY 5: VERIFY
 #################################################
 
 - name: Verify Datadog
@@ -238,13 +261,12 @@
   tasks:
 
     - meta: end_play
-      when: datadog_ok
+      when: datadog_ok or global_failed
 
-    - name: Wait for ingestion
-      pause:
+    - pause:
         seconds: 120
 
-    - name: Verify again
+    - name: Verify
       uri:
         url: "https://api.us5.datadoghq.com/api/v1/hosts"
         method: GET
@@ -252,27 +274,86 @@
           DD-API-KEY: "{{ datadog_api_key }}"
           DD-APPLICATION-KEY: "{{ datadog_app_key }}"
       register: dd_api
-      retries: 10
-      delay: 30
-      until: dd_api.status == 200
-      failed_when: false
 
     - set_fact:
-        dd_instances: >-
+        datadog_ok: >-
           {{
-            dd_api.json.host_list | default([])
-            | selectattr('meta.aws.instance-id', 'defined')
-            | map(attribute='meta.aws.instance-id')
-            | list
+            datadog_host in (
+              dd_api.json.host_list | default([])
+              | selectattr('meta.aws.instance-id', 'defined')
+              | map(attribute='meta.aws.instance-id')
+              | list
+            )
           }}
 
-    - debug:
-        msg:
-          - "📦 After install: {{ dd_instances }}"
-          - "🎯 Target: {{ datadog_host }}"
 
-    - set_fact:
-        datadog_ok: "{{ datadog_host in dd_instances }}"
+#################################################
+# PLAY 6: SUCCESS HANDLING
+#################################################
 
-    - debug:
-        msg: "✅ FINAL RESULT: {{ datadog_ok }}"
+- name: Success Handling
+  hosts: localhost
+  gather_facts: no
+
+  tasks:
+
+    - name: Close RITM
+      when: datadog_ok and not global_failed
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        body_format: json
+        body:
+          state: "3"
+          work_notes: "✅ Datadog installed and verified"
+
+    - name: Close Request
+      when: datadog_ok and not global_failed
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_request/{{ request_sys_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        body_format: json
+        body:
+          state: "3"
+
+
+#################################################
+# PLAY 7: FAILURE HANDLING
+#################################################
+
+- name: Failure Handling
+  hosts: localhost
+  gather_facts: no
+
+  tasks:
+
+    - name: Update RITM on failure
+      when: global_failed or not datadog_ok
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        body_format: json
+        body:
+          state: "-5"
+          work_notes: "❌ Failed: {{ error_message }}"
+
+    - name: Create Incident
+      when: global_failed or not datadog_ok
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/incident"
+        method: POST
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        body_format: json
+        status_code: [200, 201]
+        body:
+          short_description: "Datadog automation failed"
+          description: "{{ error_message }}"
+          assignment_group:
+            value: "{{ helpdesk_group_id }}"

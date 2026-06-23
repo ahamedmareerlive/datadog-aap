@@ -88,7 +88,6 @@
             error_message: >-
               {{ ansible_failed_result.msg | default('Play1 failure') }}
 
----
 
 #################################################
 # PLAY 2: INSTALL DATADOG (SAFE)
@@ -157,7 +156,6 @@
           debug:
             msg: "Installation failed but continuing workflow"
 
----
 
 #################################################
 # PLAY 3: VERIFY DATADOG
@@ -197,7 +195,6 @@
             datadog_ok: false
             error_message: "Datadog API failure"
 
----
 
 #################################################
 # PLAY 4: SUCCESS HANDLING
@@ -232,7 +229,6 @@
           state: "3"
       when: not global_failed
 
----
 
 #################################################
 # PLAY 5: FAILURE HANDLING + INCIDENT

@@ -1,6 +1,6 @@
 ---
 #################################################
-# PLAY 1: GET SR + TARGET HOST
+# PLAY 1: GET SR + TARGET HOST + EC2 INSTANCE ID
 #################################################
 
 - name: Get SR and prepare execution
@@ -72,9 +72,34 @@
             password: "{{ snow_password }}"
           register: opt
 
-        - name: Set target host
+        - name: Set target host (tag Name)
           set_fact:
             target_host: "{{ opt.json.result.value }}"
+
+        #################################################
+        # ✅ AWS LOOKUP FOR INSTANCE ID (KEY FIX)
+        #################################################
+
+        - name: Get EC2 instance info by Name tag
+          amazon.aws.ec2_instance_info:
+            filters:
+              "tag:Name": "{{ target_host }}"
+          register: ec2_info
+
+        - name: Validate EC2 found
+          fail:
+            msg: "No EC2 instance found for {{ target_host }}"
+          when: ec2_info.instances | length == 0
+
+        - name: Set instance_id for Datadog
+          set_fact:
+            datadog_host: "{{ ec2_info.instances[0].instance_id }}"
+
+        - name: Debug mapping
+          debug:
+            msg:
+              - "Hostname: {{ target_host }}"
+              - "Instance ID: {{ datadog_host }}"
 
         - name: Add dynamic host
           add_host:
@@ -147,9 +172,8 @@
                 | default('Installation failure')
               }}
 
-
 #################################################
-# PLAY 3: VERIFY DATADOG (WAIT + RETRY ✅)
+# PLAY 3: VERIFY DATADOG (WITH INSTANCE ID ✅)
 #################################################
 
 - name: Verify Datadog Host
@@ -158,13 +182,13 @@
 
   tasks:
 
-    - name: Wait 60 seconds before verification
+    - name: Wait 60 seconds
       pause:
         seconds: 60
 
-    - name: Check Datadog host with retry
+    - name: Check Datadog using instance ID
       uri:
-        url: "https://api.us5.datadoghq.com/api/v1/hosts?filter={{ target_host | default('unknown') }}"
+        url: "https://api.us5.datadoghq.com/api/v1/hosts?filter={{ datadog_host }}"
         method: GET
         headers:
           DD-API-KEY: "{{ datadog_api_key }}"
@@ -185,7 +209,7 @@
       when: not datadog_ok
       set_fact:
         global_failed: true
-        error_message: "Host not reporting in Datadog after retries"
+        error_message: "Host ({{ datadog_host }}) not reporting in Datadog"
 
 
 #################################################
@@ -250,8 +274,8 @@
           description: |
             Automation Failure
 
-            Host: {{ target_host | default('unknown') }}
-            RITM: {{ request_item_sys_id | default('unknown') }}
+            Host: {{ target_host }}
+            Instance ID: {{ datadog_host }}
 
             ERROR:
             {{ error_message }}
@@ -259,15 +283,3 @@
             value: "{{ helpdesk_group_id }}"
           urgency: "2"
           impact: "2"
-
-    - name: Set RITM Pending
-      when: global_failed or not datadog_ok
-      uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
-        method: PATCH
-        user: "{{ snow_user }}"
-        password: "{{ snow_password }}"
-        body_format: json
-        body:
-          state: "-5"
-          work_notes: "❌ Failed: {{ error_message }}"

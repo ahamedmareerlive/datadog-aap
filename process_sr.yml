@@ -1,14 +1,13 @@
 ---
 #################################################
-# PLAY 1: GET SR + TARGET HOST
+# PLAY 1: GET HOST DETAILS
 #################################################
 
-- name: Get SR and prepare execution
+- name: Get Target Host
   hosts: localhost
   gather_facts: no
 
   vars:
-    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
     aws_region: "ap-south-1"
 
   tasks:
@@ -16,72 +15,34 @@
     - set_fact:
         datadog_ok: false
         global_failed: false
-        error_message: ""
 
-    - block:
+    - name: AWS lookup
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+      register: ec2_info
 
-        - name: Get SR
-          uri:
-            url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_limit=1"
-            method: GET
-            user: "{{ snow_user }}"
-            password: "{{ snow_password }}"
-          register: sn
+    - name: Pick first instance (DEBUG PURPOSE)
+      set_fact:
+        datadog_host: "{{ ec2_info.instances[0].instance_id }}"
+        target_ip: "{{ ec2_info.instances[0].public_ip_address }}"
 
-        - set_fact:
-            request_item_sys_id: "{{ sn.json.result[0].sys_id }}"
-            request_sys_id: "{{ sn.json.result[0].request.value }}"
+    - debug:
+        msg:
+          - "✅ Instance ID: {{ datadog_host }}"
+          - "✅ Public IP: {{ target_ip }}"
 
-        - name: Get variables
-          uri:
-            url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?request={{ request_item_sys_id }}"
-            method: GET
-            user: "{{ snow_user }}"
-            password: "{{ snow_password }}"
-          register: mtom
-
-        - set_fact:
-            option_sys_id: "{{ mtom.json.result[-1].sc_item_option.value }}"
-
-        - name: Get hostname
-          uri:
-            url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
-            method: GET
-            user: "{{ snow_user }}"
-            password: "{{ snow_password }}"
-          register: opt
-
-        - set_fact:
-            target_host: "{{ opt.json.result.value }}"
-
-        - name: AWS lookup
-          amazon.aws.ec2_instance_info:
-            region: "{{ aws_region }}"
-            filters:
-              "tag:Name": "{{ target_host }}"
-          register: ec2_info
-
-        - set_fact:
-            datadog_host: "{{ ec2_info.instances[0].instance_id }}"
-            target_ip: "{{ ec2_info.instances[0].public_ip_address }}"
-
-        - add_host:
-            name: dynamic_target
-            ansible_host: "{{ target_ip }}"
-            ansible_user: ubuntu
-            groups: dynamic_targets
-
-      rescue:
-        - set_fact:
-            global_failed: true
-            error_message: "Play1 failure"
+    - add_host:
+        name: dynamic_target
+        ansible_host: "{{ target_ip }}"
+        ansible_user: ubuntu
+        groups: dynamic_targets
 
 
 #################################################
-# PLAY 2: PRE-CHECK (STRICT ✅)
+# PLAY 2: DATADOG PRE-CHECK (FULL DEBUG)
 #################################################
 
-- name: Pre-check Datadog
+- name: Datadog Pre-check Debug
   hosts: localhost
   gather_facts: no
 
@@ -89,7 +50,7 @@
 
     - name: Call Datadog API
       uri:
-        url: "https://api.us5.datadoghq.com/api/v1/hosts?filter={{ datadog_host }}"
+        url: "https://api.us5.datadoghq.com/api/v1/hosts"
         method: GET
         headers:
           DD-API-KEY: "{{ datadog_api_key }}"
@@ -97,30 +58,38 @@
       register: dd_check
       failed_when: false
 
-    #################################################
-    # ✅ FINAL FIX → STRICT INSTANCE MATCH
-    #################################################
+    - name: Print full API response (IMPORTANT)
+      debug:
+        var: dd_check.json
 
-    - name: Validate using AWS instance-id
+    - name: Extract all instance IDs from Datadog
       set_fact:
-        datadog_ok: >-
+        matched_instances: >-
           {{
             dd_check.json.host_list
             | default([])
             | selectattr('meta.aws.instance-id', 'defined')
-            | selectattr('meta.aws.instance-id', 'equalto', datadog_host)
+            | map(attribute='meta.aws.instance-id')
             | list
-            | length > 0
           }}
 
-    - debug:
+    - name: Show extracted instances
+      debug:
         msg:
-          - "Instance ID: {{ datadog_host }}"
-          - "Pre-check result: {{ datadog_ok }}"
+          - "🎯 Current Instance: {{ datadog_host }}"
+          - "📦 Datadog Instances: {{ matched_instances }}"
+
+    - name: Check if current instance exists
+      set_fact:
+        datadog_ok: "{{ datadog_host in matched_instances }}"
+
+    - name: Final Pre-check Decision
+      debug:
+        msg: "✅ Pre-check result (TRUE = already reporting): {{ datadog_ok }}"
 
 
 #################################################
-# PLAY 3: INSTALL DATADOG
+# PLAY 3: INSTALL (ONLY IF NEEDED)
 #################################################
 
 - name: Install Datadog
@@ -130,177 +99,117 @@
 
   tasks:
 
+    - name: Decision before install
+      debug:
+        msg: "Install decision: {{ not hostvars['localhost'].datadog_ok }}"
+
     - name: Skip install if already reporting
       meta: end_play
       when: hostvars['localhost'].datadog_ok
 
-    - block:
+    - name: Install agent
+      shell: |
+        set -e
+        apt-get update -y
+        apt-get install -y curl apt-transport-https
+        curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public | gpg --dearmor -o /usr/share/keyrings/datadog.gpg
+        echo "deb [signed-by=/usr/share/keyrings/datadog.gpg] https://apt.datadoghq.com/ stable 7" > /etc/apt/sources.list.d/datadog.list
+        apt-get update -y
+        apt-get install -y datadog-agent
 
-        - name: Install agent
-          shell: |
-            set -e
-            apt-get update -y
-            apt-get install -y curl apt-transport-https
-            curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public | gpg --dearmor -o /usr/share/keyrings/datadog.gpg
-            echo "deb [signed-by=/usr/share/keyrings/datadoghq.gpg] https://apt.datadoghq.com/ stable 7" > /etc/apt/sources.list.d/datadog.list
-            apt-get update -y
-            apt-get install -y datadog-agent
+    - name: Create config
+      shell: |
+        cp -n /etc/datadog-agent/datadog.yaml.example /etc/datadog-agent/datadog.yaml
 
-        - name: Create config
-          shell: |
-            cp -n /etc/datadog-agent/datadog.yaml.example /etc/datadog-agent/datadog.yaml
+    - name: Configure Datadog
+      blockinfile:
+        path: /etc/datadog-agent/datadog.yaml
+        block: |
+          api_key: {{ datadog_api_key }}
+          site: us5.datadoghq.com
+          dd_url: https://app.us5.datadoghq.com
 
-        - name: Configure Datadog
-          blockinfile:
-            path: /etc/datadog-agent/datadog.yaml
-            block: |
-              api_key: {{ datadog_api_key }}
-              site: us5.datadoghq.com
-              dd_url: https://app.us5.datadoghq.com
-
-        - name: Restart agent
-          service:
-            name: datadog-agent
-            state: restarted
-            enabled: yes
-
-      rescue:
-        - set_fact:
-            global_failed: true
-            error_message: "Installation failed"
+    - name: Restart agent
+      service:
+        name: datadog-agent
+        state: restarted
+        enabled: yes
 
 
 #################################################
-# PLAY 4: VERIFY (DELAY FIX ✅)
+# PLAY 4: VERIFY (FULL DEBUG)
 #################################################
 
-- name: Verify Datadog
+- name: Verify Datadog Debug
   hosts: localhost
   gather_facts: no
 
   tasks:
 
-    - meta: end_play
-      when: datadog_ok or global_failed
+    - name: Skip if already OK
+      meta: end_play
+      when: datadog_ok
 
     - name: Wait for Datadog ingest
-      pause:
+      debug:
+        msg: "⏳ Waiting 120 seconds for Datadog ingestion..."
+
+    - pause:
         seconds: 120
 
     - name: Retry Datadog check
       uri:
-        url: "https://api.us5.datadoghq.com/api/v1/hosts?filter={{ datadog_host }}"
+        url: "https://api.us5.datadoghq.com/api/v1/hosts"
         method: GET
         headers:
           DD-API-KEY: "{{ datadog_api_key }}"
           DD-APPLICATION-KEY: "{{ datadog_app_key }}"
       register: dd_api
-      retries: 10
+      retries: 5
       delay: 30
-      until: >
-        (
-          dd_api.json.host_list
-          | default([])
-          | selectattr('meta.aws.instance-id', 'defined')
-          | selectattr('meta.aws.instance-id', 'equalto', datadog_host)
-          | list
-          | length
-        ) > 0
+      until: datadog_host in (
+        dd_api.json.host_list
+        | default([])
+        | selectattr('meta.aws.instance-id', 'defined')
+        | map(attribute='meta.aws.instance-id')
+        | list
+      )
       failed_when: false
 
-    - name: Final evaluation
+    - name: Show verify response
+      debug:
+        var: dd_api.json.host_list
+
+    - name: Final check
       set_fact:
         datadog_ok: >-
           {{
-            dd_api.json.host_list
-            | default([])
-            | selectattr('meta.aws.instance-id', 'defined')
-            | selectattr('meta.aws.instance-id', 'equalto', datadog_host)
-            | list
-            | length > 0
+            datadog_host in (
+              dd_api.json.host_list
+              | default([])
+              | selectattr('meta.aws.instance-id', 'defined')
+              | map(attribute='meta.aws.instance-id')
+              | list
+            )
           }}
 
-    - name: Mark failure
-      when: not datadog_ok
-      set_fact:
-        global_failed: true
-        error_message: "Datadog not reporting after install"
+    - debug:
+        msg: "✅ Final verification result: {{ datadog_ok }}"
 
 
 #################################################
-# PLAY 5: SUCCESS
+# PLAY 5: RESULT
 #################################################
 
-- name: Success Handling
+- name: Final Decision
   hosts: localhost
   gather_facts: no
 
-  vars:
-    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
-
   tasks:
 
-    - name: Close RITM
-      when: datadog_ok and not global_failed
-      uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
-        method: PATCH
-        user: "{{ snow_user }}"
-        password: "{{ snow_password }}"
-        body_format: json
-        body:
-          state: "3"
-          work_notes: "✅ Datadog successfully verified"
+    - name: Print final result
+      debug:
+        msg:
+          - "✅ FINAL RESULT: {{ datadog_ok }}"
+          - "✅ ACTION: {{ 'SUCCESS' if datadog_ok else 'FAILURE' }}"
 
-    - name: Close Request
-      when: datadog_ok and not global_failed
-      uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_request/{{ request_sys_id }}"
-        method: PATCH
-        user: "{{ snow_user }}"
-        password: "{{ snow_password }}"
-        body_format: json
-        body:
-          state: "3"
-
-
-#################################################
-# PLAY 6: FAILURE
-#################################################
-
-- name: Failure Handling
-  hosts: localhost
-  gather_facts: no
-
-  vars:
-    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
-    helpdesk_group_id: "679434f053231300e321ddeeff7b12d8"
-
-  tasks:
-
-    - name: Update RITM
-      when: global_failed or not datadog_ok
-      uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
-        method: PATCH
-        user: "{{ snow_user }}"
-        password: "{{ snow_password }}"
-        body_format: json
-        body:
-          state: "-5"
-          work_notes: "{{ error_message }}"
-
-    - name: Create Incident
-      when: global_failed or not datadog_ok
-      uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/incident"
-        method: POST
-        user: "{{ snow_user }}"
-        password: "{{ snow_password }}"
-        body_format: json
-        status_code: [200, 201]
-        body:
-          short_description: "Datadog failure"
-          description: "{{ error_message }}"
-          assignment_group:
-            value: "{{ helpdesk_group_id }}"

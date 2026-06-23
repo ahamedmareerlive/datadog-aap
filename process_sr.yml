@@ -1,9 +1,9 @@
 ---
 #################################################
-# PLAY 1: FETCH ONLY LATEST RITM + INSTANCE
+# PLAY 1: FETCH LATEST RITM + CORRECT HOST
 #################################################
 
-- name: Get latest RITM and instance details
+- name: Get latest RITM and correct host
   hosts: localhost
   gather_facts: no
 
@@ -17,27 +17,27 @@
         datadog_ok: false
 
     #################################################
-    # ✅ ONLY LATEST RITM (CRITICAL FIX ✅)
+    # ✅ FETCH ONLY LATEST RITM
     #################################################
 
-    - name: Get latest Datadog RITM only
+    - name: Get latest RITM
       uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=short_descriptionLIKEDatadog^active=true^stateIN1,2^ORDERBYDESCsys_created_on&sysparm_limit=1"
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=active=true^stateIN1,2^ORDERBYDESCsys_created_on&sysparm_limit=1"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
         force_basic_auth: yes
       register: sn
 
-    - name: Validate latest RITM exists
+    - name: Validate RITM exists
       fail:
-        msg: "❌ No active Datadog RITM found"
+        msg: "❌ No RITM found"
       when: sn.json.result | length == 0
 
-    - name: DEBUG latest RITM
+    - name: Debug RITM
       debug:
         msg:
-          - "✅ RITM Number: {{ sn.json.result[0].number }}"
+          - "✅ RITM: {{ sn.json.result[0].number }}"
           - "✅ Sys ID: {{ sn.json.result[0].sys_id }}"
           - "✅ Created: {{ sn.json.result[0].sys_created_on }}"
 
@@ -45,49 +45,64 @@
         request_item_sys_id: "{{ sn.json.result[0].sys_id }}"
 
     #################################################
-    # ✅ FETCH VARIABLES
+    # ✅ FETCH VARIABLE LINKS (STRICT FIX ✅)
     #################################################
 
-    - name: Get variables
+    - name: Get variables ONLY for this RITM
       uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?request={{ request_item_sys_id }}"
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request_item={{ request_item_sys_id }}"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
       register: mtom
 
-    - debug:
+    - name: Debug MTOM
+      debug:
         var: mtom.json.result
 
-    - set_fact:
-        option_sys_id: "{{ mtom.json.result[-1].sc_item_option.value }}"
-
     #################################################
-    # ✅ EXTRACT HOST
+    # ✅ FETCH ACTUAL VALUES
     #################################################
 
-    - name: Get host value
+    - name: Get variable values
       uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ option_sys_id }}"
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ item.sc_item_option.value }}"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
-      register: opt
+      loop: "{{ mtom.json.result }}"
+      register: all_vars
 
-    - debug:
-        var: opt.json
-
-    - set_fact:
-        target_host: "{{ opt.json.result.value }}"
-
-    - debug:
-        msg: "✅ Target host from ServiceNow: {{ target_host }}"
+    - name: Debug all values
+      debug:
+        msg:
+          - "Value: {{ item.json.result.value }}"
+          - "Created: {{ item.json.result.sys_created_on }}"
+      loop: "{{ all_vars.results }}"
 
     #################################################
-    # ✅ AWS LOOKUP (CORRECT INSTANCE ✅)
+    # ✅ SELECT CORRECT VALUE (KEY FIX ✅)
     #################################################
 
-    - name: Get EC2 by Name tag
+    - name: Pick value ONLY from THIS RITM (latest)
+      set_fact:
+        target_host: >-
+          {{
+            all_vars.results
+            | sort(attribute='json.result.sys_created_on')
+            | map(attribute='json.result.value')
+            | last
+          }}
+
+    - name: Confirm correct host
+      debug:
+        msg: "✅ FINAL HOST FROM RITM: {{ target_host }}"
+
+    #################################################
+    # ✅ AWS LOOKUP
+    #################################################
+
+    - name: Get EC2 instance
       amazon.aws.ec2_instance_info:
         region: "{{ aws_region }}"
         filters:
@@ -97,9 +112,9 @@
     - debug:
         var: ec2_info.instances
 
-    - name: Ensure instance exists
+    - name: Ensure instance found
       fail:
-        msg: "❌ No EC2 instance found for {{ target_host }}"
+        msg: "❌ No EC2 found for {{ target_host }}"
       when: ec2_info.instances | length == 0
 
     - set_fact:
@@ -109,7 +124,7 @@
     - debug:
         msg:
           - "✅ Instance ID: {{ datadog_host }}"
-          - "✅ Target IP: {{ target_ip }}"
+          - "✅ IP: {{ target_ip }}"
 
     - add_host:
         name: dynamic_target
@@ -122,7 +137,7 @@
 # PLAY 2: DATADOG PRE-CHECK
 #################################################
 
-- name: Pre-check Datadog
+- name: Datadog Pre-check
   hosts: localhost
   gather_facts: no
 
@@ -160,7 +175,7 @@
 
 
 #################################################
-# PLAY 3: INSTALL DATADOG
+# PLAY 3: INSTALL
 #################################################
 
 - name: Install Datadog if needed
@@ -194,7 +209,7 @@
           site: us5.datadoghq.com
           dd_url: https://app.us5.datadoghq.com
 
-    - name: Restart Datadog
+    - name: Restart agent
       service:
         name: datadog-agent
         state: restarted
@@ -205,7 +220,7 @@
 # PLAY 4: VERIFY
 #################################################
 
-- name: Verify Datadog reporting
+- name: Verify Datadog
   hosts: localhost
   gather_facts: no
 

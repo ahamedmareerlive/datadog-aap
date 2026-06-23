@@ -149,7 +149,7 @@
 
 
 #################################################
-# PLAY 3: VERIFY DATADOG
+# PLAY 3: VERIFY DATADOG (WAIT + RETRY ✅)
 #################################################
 
 - name: Verify Datadog Host
@@ -158,34 +158,34 @@
 
   tasks:
 
-    - name: Verification block
-      block:
+    - name: Wait 60 seconds before verification
+      pause:
+        seconds: 60
 
-        - name: Call Datadog API
-          uri:
-            url: "https://api.us5.datadoghq.com/api/v1/hosts?filter={{ target_host | default('unknown') }}"
-            method: GET
-            headers:
-              DD-API-KEY: "{{ datadog_api_key }}"
-              DD-APPLICATION-KEY: "{{ datadog_app_key }}"
-          register: dd_api
+    - name: Check Datadog host with retry
+      uri:
+        url: "https://api.us5.datadoghq.com/api/v1/hosts?filter={{ target_host | default('unknown') }}"
+        method: GET
+        headers:
+          DD-API-KEY: "{{ datadog_api_key }}"
+          DD-APPLICATION-KEY: "{{ datadog_app_key }}"
+      register: dd_api
+      retries: 5
+      delay: 20
+      until: >
+        (dd_api.json.host_list is defined) and
+        ((dd_api.json.host_list | length) > 0)
+      failed_when: false
 
-        - name: Evaluate result
-          set_fact:
-            datadog_ok: "{{ (dd_api.json.host_list | default([])) | length > 0 }}"
+    - name: Evaluate result
+      set_fact:
+        datadog_ok: "{{ (dd_api.json.host_list | default([])) | length > 0 }}"
 
-        - name: Mark failure if not reporting
-          when: not datadog_ok
-          set_fact:
-            global_failed: true
-            error_message: "Host not reporting in Datadog"
-
-      rescue:
-        - name: Capture API failure
-          set_fact:
-            global_failed: true
-            datadog_ok: false
-            error_message: "Datadog API failure"
+    - name: Mark failure if not reporting
+      when: not datadog_ok
+      set_fact:
+        global_failed: true
+        error_message: "Host not reporting in Datadog after retries"
 
 
 #################################################
@@ -244,7 +244,7 @@
         user: "{{ snow_user }}"
         password: "{{ snow_password }}"
         body_format: json
-        status_code: [200, 201]   # ✅ CRITICAL FIX
+        status_code: [200, 201]
         body:
           short_description: "Datadog Installation Failed"
           description: |
@@ -255,7 +255,8 @@
 
             ERROR:
             {{ error_message }}
-          assignment_group: "{{ helpdesk_group_id }}"
+          assignment_group:
+            value: "{{ helpdesk_group_id }}"
           urgency: "2"
           impact: "2"
 

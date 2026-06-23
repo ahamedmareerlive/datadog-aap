@@ -33,25 +33,15 @@
       register: sn
 
     - fail:
-        msg: "❌ No RITM found"
+        msg: "No RITM found"
       when: sn.json.result | length == 0
 
     - set_fact:
         request_item_sys_id: "{{ sn.json.result[0].sys_id }}"
         request_sys_id: "{{ sn.json.result[0].request.value }}"
 
-    - name: Worknote start
-      uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
-        method: PATCH
-        user: "{{ snow_user }}"
-        password: "{{ snow_password }}"
-        body_format: json
-        body:
-          work_notes: "Automation started"
-
     #################################################
-    # ✅ GET VARIABLE (STRICT SAME RITM)
+    # ✅ GET VARIABLE
     #################################################
 
     - name: Get variable mapping
@@ -81,18 +71,8 @@
             | last
           }}
 
-    - name: Worknote host
-      uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
-        method: PATCH
-        user: "{{ snow_user }}"
-        password: "{{ snow_password }}"
-        body_format: json
-        body:
-          work_notes: "Resolved host: {{ target_host }}"
-
     #################################################
-    # ✅ AWS LOOKUP + ADD HOST (CRITICAL FIX ✅)
+    # ✅ AWS LOOKUP + ADD HOST
     #################################################
 
     - block:
@@ -113,16 +93,12 @@
               }}
 
         - fail:
-            msg: "❌ No EC2 found"
+            msg: "No EC2 found"
           when: matched_instances | length == 0
 
         - set_fact:
             datadog_host: "{{ matched_instances[0].instance_id }}"
             target_ip: "{{ matched_instances[0].public_ip_address }}"
-
-        #################################################
-        # ✅ ALWAYS ADD HOST HERE
-        #################################################
 
         - name: Add dynamic host
           add_host:
@@ -138,7 +114,7 @@
 
 
 #################################################
-# PLAY 2: DATADOG PRE-CHECK
+# PLAY 2: DATADOG PRECHECK
 #################################################
 
 - name: Datadog Pre-check
@@ -147,36 +123,30 @@
 
   tasks:
 
-    - block:
+    - name: Get Datadog hosts
+      uri:
+        url: "https://api.us5.datadoghq.com/api/v1/hosts"
+        method: GET
+        headers:
+          DD-API-KEY: "{{ datadog_api_key }}"
+          DD-APPLICATION-KEY: "{{ datadog_app_key }}"
+      register: dd_check
+      failed_when: false
 
-        - name: Get Datadog hosts
-          uri:
-            url: "https://api.us5.datadoghq.com/api/v1/hosts"
-            method: GET
-            headers:
-              DD-API-KEY: "{{ datadog_api_key }}"
-              DD-APPLICATION-KEY: "{{ datadog_app_key }}"
-          register: dd_check
-
-        - set_fact:
-            datadog_ok: >-
-              {{
-                datadog_host in (
-                  dd_check.json.host_list | default([])
-                  | selectattr('meta.aws.instance-id', 'defined')
-                  | map(attribute='meta.aws.instance-id')
-                  | list
-                )
-              }}
-
-      rescue:
-        - set_fact:
-            global_failed: true
-            error_message: "Datadog API error"
+    - set_fact:
+        datadog_ok: >-
+          {{
+            datadog_host in (
+              dd_check.json.host_list | default([])
+              | selectattr('meta.aws.instance-id', 'defined')
+              | map(attribute='meta.aws.instance-id')
+              | list
+            )
+          }}
 
 
 #################################################
-# PLAY 3: INSTALL DATADOG
+# PLAY 3: INSTALL
 #################################################
 
 - name: Install Datadog
@@ -189,44 +159,37 @@
     - meta: end_play
       when: hostvars['localhost'].datadog_ok or hostvars['localhost'].global_failed
 
-    - block:
+    - name: Install agent
+      shell: |
+        set -e
+        apt-get update -y
+        apt-get install -y curl apt-transport-https
+        curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public | gpg --dearmor -o /usr/share/keyrings/datadog.gpg
+        echo "deb [signed-by=/usr/share/keyrings/datadog.gpg] https://apt.datadoghq.com/ stable 7" > /etc/apt/sources.list.d/datadog.list
+        apt-get update -y
+        apt-get install -y datadog-agent
 
-        - name: Install agent
-          shell: |
-            set -e
-            apt-get update -y
-            apt-get install -y curl apt-transport-https
-            curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public | gpg --dearmor -o /usr/share/keyrings/datadog.gpg
-            echo "deb [signed-by=/usr/share/keyrings/datadog.gpg] https://apt.datadoghq.com/ stable 7" > /etc/apt/sources.list.d/datadog.list
-            apt-get update -y
-            apt-get install -y datadog-agent
+    - name: Ensure config exists
+      command: cp /etc/datadog-agent/datadog.yaml.example /etc/datadog-agent/datadog.yaml
+      args:
+        creates: /etc/datadog-agent/datadog.yaml
 
-        - name: Ensure config exists
-          command: cp /etc/datadog-agent/datadog.yaml.example /etc/datadog-agent/datadog.yaml
-          args:
-            creates: /etc/datadog-agent/datadog.yaml
+    - name: Configure Datadog
+      blockinfile:
+        path: /etc/datadog-agent/datadog.yaml
+        block: |
+          api_key: {{ datadog_api_key }}
+          site: us5.datadoghq.com
+          dd_url: https://app.us5.datadoghq.com
 
-        - name: Configure Datadog
-          blockinfile:
-            path: /etc/datadog-agent/datadog.yaml
-            block: |
-              api_key: {{ datadog_api_key }}
-              site: us5.datadoghq.com
-              dd_url: https://app.us5.datadoghq.com
-
-        - name: Restart agent
-          service:
-            name: datadog-agent
-            state: restarted
-
-      rescue:
-        - set_fact:
-            global_failed: true
-            error_message: "Install failed"
+    - name: Restart agent
+      service:
+        name: datadog-agent
+        state: restarted
 
 
 #################################################
-# PLAY 4: VERIFY
+# PLAY 4: VERIFY (FIXED ✅)
 #################################################
 
 - name: Verify Datadog
@@ -239,15 +202,26 @@
       when: datadog_ok or global_failed
 
     - pause:
-        seconds: 120
+        seconds: 180
 
-    - uri:
+    - name: Retry until visible in Datadog
+      uri:
         url: "https://api.us5.datadoghq.com/api/v1/hosts"
         method: GET
         headers:
           DD-API-KEY: "{{ datadog_api_key }}"
           DD-APPLICATION-KEY: "{{ datadog_app_key }}"
       register: dd_api
+      retries: 12
+      delay: 30
+      until: >
+        datadog_host in (
+          dd_api.json.host_list | default([])
+          | selectattr('meta.aws.instance-id', 'defined')
+          | map(attribute='meta.aws.instance-id')
+          | list
+        )
+      failed_when: false
 
     - set_fact:
         datadog_ok: >-
@@ -260,15 +234,15 @@
             )
           }}
 
-    - name: Mark failure if not reporting
+    - name: Mark failure
       when: not datadog_ok
       set_fact:
         global_failed: true
-        error_message: "Datadog not reporting"
+        error_message: "Datadog not reporting after retries"
 
 
 #################################################
-# PLAY 5: SUCCESS / FAILURE HANDLING
+# PLAY 5: FINAL HANDLING
 #################################################
 
 - name: Final Handling

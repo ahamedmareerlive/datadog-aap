@@ -1,16 +1,16 @@
 ---
 #################################################
-# PLAY 1: FETCH LATEST RITM + RESOLVE TARGET
+# PLAY 1: FETCH LATEST DATADOG RITM + RESOLVE TARGET
 #################################################
 
-- name: Fetch latest RITM and resolve target
+- name: Fetch latest Datadog RITM and resolve target instance
   hosts: localhost
   gather_facts: no
 
   vars:
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
     aws_region: "ap-south-1"
-    helpdesk_group_id: "679434f053231300e321ddeeff7b12d8"
+    ritm_filter_text: "Datadog"
 
   tasks:
 
@@ -23,9 +23,9 @@
             already_present: false
             error_message: ""
 
-        - name: Fetch latest active RITM
+        - name: Fetch latest active Datadog RITM only
           uri:
-            url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=active=true^stateIN1,2^ORDERBYDESCsys_created_on&sysparm_limit=1"
+            url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=short_descriptionLIKE{{ ritm_filter_text }}^active=true^stateIN1,2^ORDERBYDESCsys_created_on&sysparm_limit=1&sysparm_fields=number,sys_id,request,sys_created_on,short_description"
             method: GET
             user: "{{ snow_user }}"
             password: "{{ snow_password }}"
@@ -34,13 +34,33 @@
 
         - name: Validate latest RITM exists
           fail:
-            msg: "No active RITM found"
+            msg: "No active Datadog RITM found"
           when: ritm_response.json.result | length == 0
 
         - name: Save ServiceNow request identifiers
           set_fact:
             request_item_sys_id: "{{ ritm_response.json.result[0].sys_id }}"
             request_sys_id: "{{ ritm_response.json.result[0].request.value }}"
+            ritm_number: "{{ ritm_response.json.result[0].number }}"
+            ritm_created_on: "{{ ritm_response.json.result[0].sys_created_on }}"
+
+        - name: Debug chosen latest RITM
+          debug:
+            msg:
+              - "Chosen RITM: {{ ritm_number }}"
+              - "Created on: {{ ritm_created_on }}"
+              - "Sys ID: {{ request_item_sys_id }}"
+
+        - name: Add work note - automation started
+          uri:
+            url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
+            method: PATCH
+            user: "{{ snow_user }}"
+            password: "{{ snow_password }}"
+            force_basic_auth: yes
+            body_format: json
+            body:
+              work_notes: "Automation started for latest Datadog RITM {{ ritm_number }}"
 
         - name: Fetch MTOM mappings for latest RITM
           uri:
@@ -50,6 +70,11 @@
             password: "{{ snow_password }}"
             force_basic_auth: yes
           register: mtom_response
+
+        - name: Validate variable mappings exist
+          fail:
+            msg: "No variables found for RITM {{ ritm_number }}"
+          when: mtom_response.json.result | length == 0
 
         - name: Fetch variable values linked to latest RITM
           uri:
@@ -64,6 +89,11 @@
         - name: Extract target host from RITM variable values
           set_fact:
             target_host: "{{ variable_values.results | map(attribute='json.result.value') | last }}"
+
+        - name: Debug extracted target host
+          debug:
+            msg:
+              - "Target host from latest RITM: {{ target_host }}"
 
         - name: Fetch EC2 inventory from AWS
           amazon.aws.ec2_instance_info:
@@ -85,11 +115,11 @@
             msg: "No EC2 instance found for target host {{ target_host }}"
           when: matched_instances | length == 0
 
-        - name: Save matched EC2 instance object
+        - name: Save matched instance object
           set_fact:
             matched_instance: "{{ matched_instances[0] }}"
 
-        - name: Extract instance details safely
+        - name: Extract instance data safely
           set_fact:
             datadog_host: "{{ matched_instance.instance_id }}"
             target_ip: "{{ matched_instance.public_ip_address }}"
@@ -99,23 +129,20 @@
           set_fact:
             dynamic_user: "{{ 'ubuntu' if ec2_os == 'ubuntu' else 'ec2-user' }}"
 
+        - name: Debug resolved instance + SSH user
+          debug:
+            msg:
+              - "Resolved instance ID: {{ datadog_host }}"
+              - "Resolved target IP: {{ target_ip }}"
+              - "Resolved OS tag: {{ ec2_os }}"
+              - "Resolved SSH user: {{ dynamic_user }}"
+
         - name: Add dynamic target host into runtime inventory
           add_host:
             name: dynamic_target
             ansible_host: "{{ target_ip }}"
             ansible_user: "{{ dynamic_user }}"
             groups: dynamic_targets
-
-        - name: Add work note that automation started
-          uri:
-            url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
-            method: PATCH
-            user: "{{ snow_user }}"
-            password: "{{ snow_password }}"
-            force_basic_auth: yes
-            body_format: json
-            body:
-              work_notes: "Automation started. Target host resolved as {{ target_host }} (Instance ID: {{ datadog_host }})"
 
       rescue:
 
@@ -145,7 +172,7 @@
 # PLAY 2: DATADOG PRE-CHECK
 #################################################
 
-- name: Check if Datadog already exists
+- name: Check if Datadog already exists for this target
   hosts: localhost
   gather_facts: no
 
@@ -174,6 +201,12 @@
           set_fact:
             datadog_ok: "{{ datadog_host in (datadog_hosts_response.json.host_list | default([]) | map(attribute='host_name') | list) }}"
             already_present: "{{ datadog_host in (datadog_hosts_response.json.host_list | default([]) | map(attribute='host_name') | list) }}"
+
+        - name: Debug Datadog pre-check result
+          debug:
+            msg:
+              - "Datadog already present: {{ already_present }}"
+              - "Datadog host being checked: {{ datadog_host }}"
 
       rescue:
 
@@ -219,7 +252,7 @@
           meta: end_play
           when: hostvars['localhost'].global_failed | default(false)
 
-        - name: Skip installation when Datadog is already installed
+        - name: Skip installation when Datadog already exists
           when: hostvars['localhost'].already_present | default(false)
           block:
 
@@ -237,7 +270,7 @@
                   state: "3"
                   work_notes: "✅ Datadog already installed / already reporting. No install required."
 
-            - name: Close parent request because Datadog already exists
+            - name: Close parent Request because Datadog already exists
               delegate_to: localhost
               become: false
               uri:
@@ -390,7 +423,7 @@
 # PLAY 4: VERIFY
 #################################################
 
-- name: Verify Datadog reporting
+- name: Verify Datadog reporting after installation
   hosts: localhost
   gather_facts: no
 
@@ -430,7 +463,7 @@
           set_fact:
             datadog_ok: "{{ datadog_host in (verify_datadog_response.json.host_list | default([]) | map(attribute='host_name') | list) }}"
 
-        - name: Mark verify as pending if still not visible
+        - name: Handle verify result if host still not visible
           when: not datadog_ok
           block:
 
@@ -522,6 +555,7 @@
 
       rescue:
 
-        - name: Log final stage failure
+        - name: Log final closure failure
           debug:
             msg: "Final closure stage failed"
+

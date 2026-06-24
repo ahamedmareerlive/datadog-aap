@@ -20,8 +20,7 @@
             global_failed: false
             datadog_ok: false
 
-      - name: Get latest RITM
-        uri:
+      - uri:
           url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item?sysparm_query=active=true^stateIN1,2^ORDERBYDESCsys_created_on&sysparm_limit=1"
           method: GET
           user: "{{ snow_user }}"
@@ -37,8 +36,7 @@
           request_item_sys_id: "{{ sn.json.result[0].sys_id }}"
           request_sys_id: "{{ sn.json.result[0].request.value }}"
 
-      - name: Get MTOM
-        uri:
+      - uri:
           url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request_item={{ request_item_sys_id }}"
           method: GET
           user: "{{ snow_user }}"
@@ -46,8 +44,7 @@
           force_basic_auth: yes
         register: mtom
 
-      - name: Get variables
-        uri:
+      - uri:
           url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option/{{ item.sc_item_option.value }}"
           method: GET
           user: "{{ snow_user }}"
@@ -59,8 +56,7 @@
       - set_fact:
           target_host: "{{ all_vars.results | map(attribute='json.result.value') | last }}"
 
-      - name: AWS lookup
-        amazon.aws.ec2_instance_info:
+      - amazon.aws.ec2_instance_info:
           region: "{{ aws_region }}"
         register: ec2_info
 
@@ -94,13 +90,14 @@
 
     rescue:
 
+      - set_fact:
+          error_message: "{{ ansible_failed_result.msg | default('Unknown error') }}"
+
       - set_stats:
           data:
             global_failed: true
-            error_message: "{{ ansible_failed_result.msg }}"
 
-      - name: Update RITM Pending
-        uri:
+      - uri:
           url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
           method: PATCH
           user: "{{ snow_user }}"
@@ -147,8 +144,7 @@
           data:
             global_failed: true
 
-      - name: Update RITM Pending
-        uri:
+      - uri:
           url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
           method: PATCH
           user: "{{ snow_user }}"
@@ -180,16 +176,10 @@
   - meta: end_play
     when: global_failed | default(false)
 
-  #################################################
-  # ALREADY INSTALLED
-  #################################################
-
   - name: Skip if already installed
     when: datadog_ok | default(false)
     block:
-
-      - name: Close RITM
-        delegate_to: localhost
+      - delegate_to: localhost
         become: false
         uri:
           url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ hostvars['localhost'].request_item_sys_id }}"
@@ -202,8 +192,7 @@
             state: "3"
             work_notes: "✅ Already installed"
 
-      - name: Close Request
-        delegate_to: localhost
+      - delegate_to: localhost
         become: false
         uri:
           url: "https://{{ servicenow_instance }}/api/now/table/sc_request/{{ hostvars['localhost'].request_sys_id }}"
@@ -217,59 +206,38 @@
 
       - meta: end_play
 
-  #################################################
-  # INSTALL BLOCK (MULTI-OS)
-  #################################################
-
   - block:
 
-      - name: Install deps (Debian)
-        apt:
+      - apt:
           name: [apt-transport-https, curl, gnupg]
           state: present
           update_cache: yes
         when: ansible_os_family == "Debian"
 
-      - name: Add key (Debian)
-        shell: |
+      - shell: |
           curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public \
           | gpg --dearmor -o /usr/share/keyrings/datadog-archive-keyring.gpg
         args:
           creates: /usr/share/keyrings/datadog-archive-keyring.gpg
         when: ansible_os_family == "Debian"
 
-      - name: Add repo (Debian)
-        copy:
+      - copy:
           dest: /etc/apt/sources.list.d/datadog.list
           content: |
-            deb [signed-by=/usr/share/keyrings/datadog-archive-keyring.gpg] https://apt.datadoghq.com/ stable 7
+            deb https://apt.datadoghq.com/ stable 7
         when: ansible_os_family == "Debian"
 
       - apt:
           name: datadog-agent
           state: present
-          update_cache: yes
         when: ansible_os_family == "Debian"
-
-      - name: Add repo (RHEL)
-        copy:
-          dest: /etc/yum.repos.d/datadog.repo
-          content: |
-            [datadog]
-            name=Datadog
-            baseurl=https://yum.datadoghq.com/stable/7/x86_64/
-            enabled=1
-            gpgcheck=1
-            gpgkey=https://keys.datadoghq.com/DATADOG_RPM_KEY_CURRENT.public
-        when: ansible_os_family == "RedHat"
 
       - yum:
           name: datadog-agent
           state: present
         when: ansible_os_family == "RedHat"
 
-      - name: Configure Datadog
-        lineinfile:
+      - lineinfile:
           path: /etc/datadog-agent/datadog.yaml
           regexp: '^api_key:'
           line: "api_key: {{ datadog_api_key }}"
@@ -283,19 +251,16 @@
           data:
             datadog_ok: true
 
-    #################################################
-    # INSTALL FAILURE → INCIDENT + GLOBAL STOP ✅
-    #################################################
-
     rescue:
+
+      - set_fact:
+          error_message: "{{ ansible_failed_result.msg | default('Unknown error') }}"
 
       - set_stats:
           data:
             global_failed: true
-            error_message: "{{ ansible_failed_result.msg | default('Unknown error') }}"
 
-      - name: Update RITM failure
-        delegate_to: localhost
+      - delegate_to: localhost
         become: false
         uri:
           url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ hostvars['localhost'].request_item_sys_id }}"
@@ -306,10 +271,9 @@
           body_format: json
           body:
             state: "-5"
-            work_notes: "❌ Install failed: {{ hostvars['localhost'].ansible_stats.data.error_message }}
+            work_notes: "❌ Install failed: {{ error_message }}"
 
-      - name: Create Incident ✅
-        delegate_to: localhost
+      - delegate_to: localhost
         become: false
         uri:
           url: "https://{{ servicenow_instance }}/api/now/table/incident"
@@ -318,10 +282,10 @@
           password: "{{ snow_password }}"
           force_basic_auth: yes
           body_format: json
-          status_code: [200, 201]
+          status_code: [200,201]
           body:
             short_description: "Datadog install failed"
-            description: "{{ hostvars['localhost'].ansible_stats.data.error_message }}"
+            description: "{{ error_message }}"
             assignment_group:
               value: "{{ helpdesk_group_id }}"
 
@@ -329,7 +293,7 @@
 
 
 #################################################
-# PLAY 4: VERIFY (WILL NOT RUN AFTER FAILURE ✅)
+# PLAY 4: VERIFY
 #################################################
 
 - name: Verify Datadog
@@ -338,52 +302,67 @@
 
   tasks:
 
-  - meta: end_play
-    when: global_failed | default(false)
+    - meta: end_play
+      when: global_failed | default(false)
 
-  - pause:
-      seconds: 120
+    - pause:
+        seconds: 180
 
-  - uri:
-      url: "https://api.us5.datadoghq.com/api/v1/hosts"
-      method: GET
-      headers:
-        DD-API-KEY: "{{ datadog_api_key }}"
-        DD-APPLICATION-KEY: "{{ datadog_app_key }}"
-    register: dd_api
+    - uri:
+        url: "https://api.us5.datadoghq.com/api/v1/hosts"
+        method: GET
+        headers:
+          DD-API-KEY: "{{ datadog_api_key }}"
+          DD-APPLICATION-KEY: "{{ datadog_app_key }}"
+      register: dd_api
+      retries: 10
+      delay: 30
+      until: datadog_host in (dd_api.json.host_list | map(attribute='host_name') | list)
+      failed_when: false
+
+    - set_stats:
+        data:
+          datadog_ok: "{{ datadog_host in (dd_api.json.host_list | map(attribute='host_name') | list) }}"
 
 
 #################################################
-# FINAL SUCCESS (WILL NOT RUN AFTER FAILURE ✅)
+# PLAY 5: FINAL SUCCESS
 #################################################
 
-- name: Close Success
+- name: Final Handling
   hosts: localhost
   gather_facts: no
 
+  vars:
+    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
+
   tasks:
 
-  - meta: end_play
-    when: global_failed | default(false)
+    - meta: end_play
+      when: global_failed | default(false)
 
-  - name: Close RITM
-    uri:
-      url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
-      method: PATCH
-      user: "{{ snow_user }}"
-      password: "{{ snow_password }}"
-      force_basic_auth: yes
-      body_format: json
-      body:
-        state: "3"
+    - name: Close RITM
+      when: datadog_ok
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        force_basic_auth: yes
+        body_format: json
+        body:
+          state: "3"
+          work_notes: "✅ Datadog installed successfully"
 
-  - name: Close Request
-    uri:
-      url: "https://{{ servicenow_instance }}/api/now/table/sc_request/{{ request_sys_id }}"
-      method: PATCH
-      user: "{{ snow_user }}"
-      password: "{{ snow_password }}"
-      force_basic_auth: yes
-      body_format: json
-      body:
-        state: "3"
+    - name: Close Request
+      when: datadog_ok
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_request/{{ request_sys_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        force_basic_auth: yes
+        body_format: json
+        body:
+          state: "3"
+

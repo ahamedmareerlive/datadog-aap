@@ -1,15 +1,16 @@
 ---
 #################################################
-# PLAY 1: FETCH LATEST DATADOG RITM + RESOLVE TARGET
+# PLAY 1: FETCH LATEST RITM + RESOLVE TARGET
 #################################################
 
-- name: Fetch latest Datadog RITM and resolve target instance
+- name: Fetch latest Datadog RITM and resolve target
   hosts: localhost
   gather_facts: no
 
   vars:
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
     aws_region: "ap-south-1"
+    helpdesk_group_id: "679434f053231300e321ddeeff7b12d8"
     ritm_filter_text: "Datadog"
 
   tasks:
@@ -43,13 +44,6 @@
             request_sys_id: "{{ ritm_response.json.result[0].request.value }}"
             ritm_number: "{{ ritm_response.json.result[0].number }}"
             ritm_created_on: "{{ ritm_response.json.result[0].sys_created_on }}"
-
-        - name: Debug chosen latest RITM
-          debug:
-            msg:
-              - "Chosen RITM: {{ ritm_number }}"
-              - "Created on: {{ ritm_created_on }}"
-              - "Sys ID: {{ request_item_sys_id }}"
 
         - name: Add work note - automation started
           uri:
@@ -90,10 +84,16 @@
           set_fact:
             target_host: "{{ variable_values.results | map(attribute='json.result.value') | last }}"
 
-        - name: Debug extracted target host
-          debug:
-            msg:
-              - "Target host from latest RITM: {{ target_host }}"
+        - name: Add work note - target host resolved
+          uri:
+            url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
+            method: PATCH
+            user: "{{ snow_user }}"
+            password: "{{ snow_password }}"
+            force_basic_auth: yes
+            body_format: json
+            body:
+              work_notes: "Target host resolved as {{ target_host }}"
 
         - name: Fetch EC2 inventory from AWS
           amazon.aws.ec2_instance_info:
@@ -115,7 +115,7 @@
             msg: "No EC2 instance found for target host {{ target_host }}"
           when: matched_instances | length == 0
 
-        - name: Save matched instance object
+        - name: Save matched EC2 instance object
           set_fact:
             matched_instance: "{{ matched_instances[0] }}"
 
@@ -129,15 +129,7 @@
           set_fact:
             dynamic_user: "{{ 'ubuntu' if ec2_os == 'ubuntu' else 'ec2-user' }}"
 
-        - name: Debug resolved instance + SSH user
-          debug:
-            msg:
-              - "Resolved instance ID: {{ datadog_host }}"
-              - "Resolved target IP: {{ target_ip }}"
-              - "Resolved OS tag: {{ ec2_os }}"
-              - "Resolved SSH user: {{ dynamic_user }}"
-
-        - name: Add dynamic target host into runtime inventory
+        - name: Add runtime target host into Ansible inventory
           add_host:
             name: dynamic_target
             ansible_host: "{{ target_ip }}"
@@ -147,6 +139,8 @@
       rescue:
 
         - name: Capture pre-check failure
+          delegate_to: localhost
+          delegate_facts: true
           set_fact:
             global_failed: true
             error_message: "{{ ansible_failed_result.msg | default('Unknown pre-check failure') }}"
@@ -162,7 +156,7 @@
             body_format: json
             body:
               state: "2"
-              work_notes: "⚠️ Pre-check failed: {{ error_message }}"
+              work_notes: "⚠️ Pre-check failed: {{ hostvars['localhost'].error_message }}"
 
         - name: Stop workflow after pre-check failure
           meta: end_play
@@ -202,15 +196,11 @@
             datadog_ok: "{{ datadog_host in (datadog_hosts_response.json.host_list | default([]) | map(attribute='host_name') | list) }}"
             already_present: "{{ datadog_host in (datadog_hosts_response.json.host_list | default([]) | map(attribute='host_name') | list) }}"
 
-        - name: Debug Datadog pre-check result
-          debug:
-            msg:
-              - "Datadog already present: {{ already_present }}"
-              - "Datadog host being checked: {{ datadog_host }}"
-
       rescue:
 
         - name: Capture Datadog pre-check failure
+          delegate_to: localhost
+          delegate_facts: true
           set_fact:
             global_failed: true
             error_message: "{{ ansible_failed_result.msg | default('Datadog API pre-check failed') }}"
@@ -225,7 +215,7 @@
             body_format: json
             body:
               state: "2"
-              work_notes: "⚠️ Datadog pre-check failed: {{ error_message }}"
+              work_notes: "⚠️ Datadog pre-check failed: {{ hostvars['localhost'].error_message }}"
 
         - name: Stop workflow after Datadog pre-check failure
           meta: end_play
@@ -379,6 +369,7 @@
 
         - name: Capture installation failure
           delegate_to: localhost
+          delegate_facts: true
           become: false
           set_fact:
             global_failed: true
@@ -396,7 +387,7 @@
             body_format: json
             body:
               state: "-5"
-              work_notes: "❌ Datadog installation failed: {{ error_message }}"
+              work_notes: "❌ Datadog installation failed: {{ hostvars['localhost'].error_message }}"
 
         - name: Create ServiceNow incident for install failure
           delegate_to: localhost
@@ -411,7 +402,7 @@
             status_code: [200, 201]
             body:
               short_description: "Datadog installation failed"
-              description: "{{ error_message }}"
+              description: "{{ hostvars['localhost'].error_message }}"
               assignment_group:
                 value: "{{ helpdesk_group_id }}"
 
@@ -485,6 +476,8 @@
       rescue:
 
         - name: Capture verification failure
+          delegate_to: localhost
+          delegate_facts: true
           set_fact:
             global_failed: true
             error_message: "{{ ansible_failed_result.msg | default('Datadog verification failed') }}"
@@ -499,7 +492,7 @@
             body_format: json
             body:
               state: "2"
-              work_notes: "⚠️ Datadog verification failed: {{ error_message }}"
+              work_notes: "⚠️ Datadog verification failed: {{ hostvars['localhost'].error_message }}"
 
         - name: Stop workflow after verification failure
           meta: end_play
@@ -558,4 +551,3 @@
         - name: Log final closure failure
           debug:
             msg: "Final closure stage failed"
-

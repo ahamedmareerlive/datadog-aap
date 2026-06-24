@@ -15,9 +15,10 @@
 
   - block:
 
-      - set_fact:
-          datadog_ok: false
-          global_failed: false
+      - set_stats:
+          data:
+            global_failed: false
+            datadog_ok: false
 
       - name: Get latest RITM
         uri:
@@ -93,9 +94,10 @@
 
     rescue:
 
-      - set_fact:
-          global_failed: true
-          error_message: "{{ ansible_failed_result.msg }}"
+      - set_stats:
+          data:
+            global_failed: true
+            error_message: "{{ ansible_failed_result.msg }}"
 
       - name: Update RITM Pending
         uri:
@@ -123,12 +125,11 @@
   tasks:
 
   - meta: end_play
-    when: global_failed
+    when: global_failed | default(false)
 
   - block:
 
-      - name: Check Datadog
-        uri:
+      - uri:
           url: "https://api.us5.datadoghq.com/api/v1/hosts"
           method: GET
           headers:
@@ -136,13 +137,15 @@
             DD-APPLICATION-KEY: "{{ datadog_app_key }}"
         register: dd_check
 
-      - set_fact:
-          datadog_ok: "{{ datadog_host in (dd_check.json.host_list | map(attribute='host_name') | list) }}"
+      - set_stats:
+          data:
+            datadog_ok: "{{ datadog_host in (dd_check.json.host_list | map(attribute='host_name') | list) }}"
 
     rescue:
 
-      - set_fact:
-          global_failed: true
+      - set_stats:
+          data:
+            global_failed: true
 
       - name: Update RITM Pending
         uri:
@@ -160,7 +163,7 @@
 
 
 #################################################
-# PLAY 3: INSTALL (ONLY HERE INCIDENT)
+# PLAY 3: INSTALL
 #################################################
 
 - name: Install Datadog
@@ -175,14 +178,14 @@
   tasks:
 
   - meta: end_play
-    when: hostvars['localhost'].global_failed
+    when: global_failed | default(false)
 
   #################################################
   # ALREADY INSTALLED
   #################################################
 
   - name: Skip if already installed
-    when: hostvars['localhost'].datadog_ok
+    when: datadog_ok | default(false)
     block:
 
       - name: Close RITM
@@ -276,18 +279,20 @@
           state: restarted
           enabled: yes
 
-      - set_fact:
-          datadog_ok: true
+      - set_stats:
+          data:
+            datadog_ok: true
 
     #################################################
-    # INSTALL FAILURE → INCIDENT + HARD STOP ✅
+    # INSTALL FAILURE → INCIDENT + GLOBAL STOP ✅
     #################################################
 
     rescue:
 
-      - set_fact:
-          global_failed: true
-          error_message: "{{ ansible_failed_result.msg }}"
+      - set_stats:
+          data:
+            global_failed: true
+            error_message: "{{ ansible_failed_result.msg }}"
 
       - name: Update RITM failure
         delegate_to: localhost
@@ -320,15 +325,11 @@
             assignment_group:
               value: "{{ helpdesk_group_id }}"
 
-      #################################################
-      # ✅ HARD GLOBAL STOP
-      #################################################
-
       - meta: end_play
 
 
 #################################################
-# PLAY 4: VERIFY (SKIPPED IF FAIL)
+# PLAY 4: VERIFY (WILL NOT RUN AFTER FAILURE ✅)
 #################################################
 
 - name: Verify Datadog
@@ -338,43 +339,22 @@
   tasks:
 
   - meta: end_play
-    when: global_failed
+    when: global_failed | default(false)
 
-  - block:
+  - pause:
+      seconds: 120
 
-      - pause:
-          seconds: 120
-
-      - uri:
-          url: "https://api.us5.datadoghq.com/api/v1/hosts"
-          method: GET
-          headers:
-            DD-API-KEY: "{{ datadog_api_key }}"
-            DD-APPLICATION-KEY: "{{ datadog_app_key }}"
-        register: dd_api
-        retries: 5
-        delay: 30
-        until: datadog_host in (dd_api.json.host_list | map(attribute='host_name') | list)
-
-    rescue:
-
-      - name: Update RITM Pending
-        uri:
-          url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
-          method: PATCH
-          user: "{{ snow_user }}"
-          password: "{{ snow_password }}"
-          force_basic_auth: yes
-          body_format: json
-          body:
-            state: "2"
-            work_notes: "⚠️ Datadog not reporting"
-
-      - meta: end_play
+  - uri:
+      url: "https://api.us5.datadoghq.com/api/v1/hosts"
+      method: GET
+      headers:
+        DD-API-KEY: "{{ datadog_api_key }}"
+        DD-APPLICATION-KEY: "{{ datadog_app_key }}"
+    register: dd_api
 
 
 #################################################
-# FINAL SUCCESS
+# FINAL SUCCESS (WILL NOT RUN AFTER FAILURE ✅)
 #################################################
 
 - name: Close Success
@@ -384,7 +364,7 @@
   tasks:
 
   - meta: end_play
-    when: global_failed
+    when: global_failed | default(false)
 
   - name: Close RITM
     uri:
@@ -396,7 +376,6 @@
       body_format: json
       body:
         state: "3"
-        work_notes: "✅ Installed & verified"
 
   - name: Close Request
     uri:
@@ -408,4 +387,3 @@
       body_format: json
       body:
         state: "3"
-

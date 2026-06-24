@@ -3,7 +3,7 @@
 # PLAY 1: FETCH + AWS LOOKUP
 #################################################
 
-- name: Fetch latest RITM and prepare target
+- name: Fetch latest RITM and target
   hosts: localhost
   gather_facts: no
 
@@ -39,7 +39,7 @@
           request_item_sys_id: "{{ sn.json.result[0].sys_id }}"
           request_sys_id: "{{ sn.json.result[0].request.value }}"
 
-      - name: Fetch MTOM
+      - name: Fetch MTOM mapping
         uri:
           url: "https://{{ servicenow_instance }}/api/now/table/sc_item_option_mtom?sysparm_query=request_item={{ request_item_sys_id }}"
           method: GET
@@ -69,19 +69,16 @@
         set_fact:
           matched_instances: "{{ ec2_info.instances | selectattr('tags.Name','search', target_host) | list }}"
 
-      - name: Fail if no match
+      - name: Fail if not found
         fail:
           msg: "EC2 not found"
         when: matched_instances | length == 0
 
-      - name: Extract instance details
+      - name: Extract instance data
         set_fact:
           datadog_host: "{{ matched_instances[0].instance_id }}"
           target_ip: "{{ matched_instances[0].public_ip_address }}"
           ec2_os: "{{ (matched_instances[0].tags.OS if 'OS' in matched_instances[0].tags else 'amzn') | lower }}"
-
-      - name: Set SSH user
-        set_fact:
           dynamic_user: "{{ 'ubuntu' if ec2_os == 'ubuntu' else 'ec2-user' }}"
 
       - name: Add dynamic host
@@ -93,12 +90,12 @@
 
     rescue:
 
-      - name: Capture error
+      - name: Capture failure
         set_fact:
-          error_message: "{{ ansible_failed_result.msg | default('Unknown error') }}"
           global_failed: true
+          error_message: "{{ ansible_failed_result.msg | default('Unknown error') }}"
 
-      - name: Update RITM pending
+      - name: Update RITM Pending
         uri:
           url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
           method: PATCH
@@ -113,20 +110,19 @@
 
 
 #################################################
-# PLAY 2: DATADOG PRECHECK (FIXED ✅)
+# PLAY 2: DATADOG PRECHECK
 #################################################
 
-- name: Check Datadog presence
+- name: Datadog Pre-check
   hosts: localhost
   gather_facts: no
 
   tasks:
 
-  - block:
+  - meta: end_play
+    when: hostvars['localhost'].global_failed | default(false)
 
-      - name: Stop if previous failure
-        meta: end_play
-        when: global_failed
+  - block:
 
       - name: Fetch Datadog hosts
         uri:
@@ -137,18 +133,18 @@
             DD-APPLICATION-KEY: "{{ datadog_app_key }}"
         register: dd_check
 
-      - name: Check installed
+      - name: Determine if already installed
         set_fact:
           datadog_ok: "{{ datadog_host in (dd_check.json.host_list | map(attribute='host_name') | list) }}"
 
     rescue:
 
-      - name: Mark failure + capture error
+      - name: Mark API failure
         set_fact:
           global_failed: true
-          error_message: "{{ ansible_failed_result.msg | default('Datadog API error') }}"
+          error_message: "Datadog API failure"
 
-      - name: Update RITM pending
+      - name: Update RITM Pending
         uri:
           url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
           method: PATCH
@@ -157,7 +153,7 @@
           body_format: json
           body:
             state: "2"
-            work_notes: "⚠️ Datadog API failure: {{ error_message }}"
+            work_notes: "{{ error_message }}"
 
       - meta: end_play
 
@@ -177,55 +173,86 @@
 
   tasks:
 
+  - meta: end_play
+    when: hostvars['localhost'].global_failed | default(false)
+
+  - name: Skip if already installed
+    when: hostvars['localhost'].datadog_ok | default(false)
+    block:
+
+      - name: Close RITM (already installed)
+        delegate_to: localhost
+        uri:
+          url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ hostvars['localhost'].request_item_sys_id }}"
+          method: PATCH
+          user: "{{ snow_user }}"
+          password: "{{ snow_password }}"
+          body_format: json
+          body:
+            state: "3"
+            work_notes: "✅ Datadog already installed"
+
+      - meta: end_play
+
   - block:
 
-      - name: Stop if failure
-        meta: end_play
-        when: global_failed
-
-      - name: Skip if already installed
-        when: datadog_ok
-        block:
-          - name: Close RITM
-            delegate_to: localhost
-            uri:
-              url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ hostvars['localhost'].request_item_sys_id }}"
-              method: PATCH
-              user: "{{ snow_user }}"
-              password: "{{ snow_password }}"
-              body_format: json
-              body:
-                state: "3"
-                work_notes: "✅ Already installed"
-
-          - meta: end_play
-
       #################################################
-      # MULTI-OS INSTALL
+      # ✅ DEBIAN / UBUNTU
       #################################################
 
-      - name: Install deps (Debian)
+      - name: Install dependencies (Debian)
         apt:
-          name: [apt-transport-https, curl, gnupg]
+          name:
+            - apt-transport-https
+            - curl
+            - gnupg
           state: present
           update_cache: yes
         when: ansible_os_family == "Debian"
 
-      - name: Add repo & install (Debian)
+      - name: Add GPG key
         shell: |
           curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public \
           | gpg --dearmor -o /usr/share/keyrings/datadog.gpg
-          echo "deb https://apt.datadoghq.com/ stable 7" > /etc/apt/sources.list.d/datadog.list
-          apt-get update -y && apt-get install -y datadog-agent
+        args:
+          creates: /usr/share/keyrings/datadog.gpg
         when: ansible_os_family == "Debian"
 
-      - name: Install (RHEL)
+      - name: Add repo Debian
+        copy:
+          dest: /etc/apt/sources.list.d/datadog.list
+          content: "deb https://apt.datadoghq.com/ stable 7"
+        when: ansible_os_family == "Debian"
+
+      - name: Install Datadog Debian
+        apt:
+          name: datadog-agent
+          state: present
+          update_cache: yes
+        when: ansible_os_family == "Debian"
+
+      #################################################
+      # ✅ RHEL / AMAZON
+      #################################################
+
+      - name: Add repo RHEL
+        copy:
+          dest: /etc/yum.repos.d/datadog.repo
+          content: |
+            [datadog]
+            name=Datadog
+            baseurl=https://yum.datadoghq.com/stable/7/x86_64/
+            enabled=1
+            gpgcheck=0
+        when: ansible_os_family == "RedHat"
+
+      - name: Install Datadog RHEL
         yum:
           name: datadog-agent
           state: present
         when: ansible_os_family == "RedHat"
 
-      - name: Configure agent
+      - name: Configure API key
         lineinfile:
           path: /etc/datadog-agent/datadog.yaml
           regexp: '^api_key:'
@@ -239,7 +266,8 @@
 
     rescue:
 
-      - name: Capture install error
+      - name: Capture install failure
+        delegate_to: localhost
         set_fact:
           global_failed: true
           error_message: "{{ ansible_failed_result.msg }}"
@@ -284,47 +312,28 @@
 
   tasks:
 
-  - block:
+    - meta: end_play
+      when: hostvars['localhost'].global_failed | default(false)
 
-      - name: Stop if failed
-        meta: end_play
-        when: global_failed
+    - name: Wait before verification
+      pause:
+        seconds: 180
 
-      - name: Wait before verify
-        pause:
-          seconds: 180
+    - name: Verify Datadog host
+      uri:
+        url: "https://api.us5.datadoghq.com/api/v1/hosts"
+        method: GET
+        headers:
+          DD-API-KEY: "{{ datadog_api_key }}"
+          DD-APPLICATION-KEY: "{{ datadog_app_key }}"
+      register: dd_api
+      retries: 10
+      delay: 30
+      until: datadog_host in (dd_api.json.host_list | map(attribute='host_name') | list)
+      failed_when: false
 
-      - name: Verify Datadog host
-        uri:
-          url: "https://api.us5.datadoghq.com/api/v1/hosts"
-          method: GET
-          headers:
-            DD-API-KEY: "{{ datadog_api_key }}"
-            DD-APPLICATION-KEY: "{{ datadog_app_key }}"
-        register: dd_api
-        retries: 10
-        delay: 30
-        until: datadog_host in (dd_api.json.host_list | map(attribute='host_name') | list)
-        failed_when: false
-
-      - name: Set verification result
-        set_fact:
-          datadog_ok: "{{ datadog_host in (dd_api.json.host_list | map(attribute='host_name') | list) }}"
-
-    rescue:
-
-      - name: Mark pending if verify fails
-        uri:
-          url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
-          method: PATCH
-          user: "{{ snow_user }}"
-          password: "{{ snow_password }}"
-          body_format: json
-          body:
-            state: "2"
-            work_notes: "⚠️ Verification failed"
-
-      - meta: end_play
+    - set_fact:
+        datadog_ok: "{{ datadog_host in (dd_api.json.host_list | map(attribute='host_name') | list) }}"
 
 
 #################################################
@@ -337,38 +346,28 @@
 
   tasks:
 
-  - block:
+    - meta: end_play
+      when: hostvars['localhost'].global_failed | default(false)
 
-      - name: Stop if failed
-        meta: end_play
-        when: global_failed
+    - name: Close RITM
+      when: datadog_ok
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        body_format: json
+        body:
+          state: "3"
+          work_notes: "✅ Datadog installed successfully"
 
-      - name: Close RITM
-        when: datadog_ok
-        uri:
-          url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
-          method: PATCH
-          user: "{{ snow_user }}"
-          password: "{{ snow_password }}"
-          body_format: json
-          body:
-            state: "3"
-            work_notes: "✅ Datadog installed successfully"
-
-      - name: Close Request
-        when: datadog_ok
-        uri:
-          url: "https://{{ servicenow_instance }}/api/now/table/sc_request/{{ request_sys_id }}"
-          method: PATCH
-          user: "{{ snow_user }}"
-          password: "{{ snow_password }}"
-          body_format: json
-          body:
-            state: "3"
-
-    rescue:
-
-      - name: Log final stage failure
-        debug:
-          msg: "Final stage failed"
-
+    - name: Close Request
+      when: datadog_ok
+      uri:
+        url: "https://{{ servicenow_instance }}/api/now/table/sc_request/{{ request_sys_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_password }}"
+        body_format: json
+        body:
+          state: "3"

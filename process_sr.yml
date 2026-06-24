@@ -292,7 +292,7 @@
       - set_stats:
           data:
             global_failed: true
-            error_message: "{{ ansible_failed_result.msg }}"
+            error_message: "{{ ansible_failed_result.msg | default('Unknown error') }}"
 
       - name: Update RITM failure
         delegate_to: localhost
@@ -306,7 +306,7 @@
           body_format: json
           body:
             state: "-5"
-            work_notes: "❌ Install failed: {{ error_message }}"
+            work_notes: "❌ Install failed: {{ hostvars['localhost'].ansible_stats.data.error_message }}
 
       - name: Create Incident ✅
         delegate_to: localhost
@@ -321,7 +321,7 @@
           status_code: [200, 201]
           body:
             short_description: "Datadog install failed"
-            description: "{{ error_message }}"
+            description: "{{ hostvars['localhost'].ansible_stats.data.error_message }}"
             assignment_group:
               value: "{{ helpdesk_group_id }}"
 

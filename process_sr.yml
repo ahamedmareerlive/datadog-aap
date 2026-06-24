@@ -94,9 +94,10 @@
     rescue:
 
       - set_fact:
+          global_failed: true
           error_message: "{{ ansible_failed_result.msg }}"
 
-      - name: Update RITM (Pending)
+      - name: Update RITM Pending
         uri:
           url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
           method: PATCH
@@ -121,9 +122,12 @@
 
   tasks:
 
+  - meta: end_play
+    when: global_failed
+
   - block:
 
-      - name: Check Datadog API
+      - name: Check Datadog
         uri:
           url: "https://api.us5.datadoghq.com/api/v1/hosts"
           method: GET
@@ -137,7 +141,10 @@
 
     rescue:
 
-      - name: Update RITM (Pending)
+      - set_fact:
+          global_failed: true
+
+      - name: Update RITM Pending
         uri:
           url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
           method: PATCH
@@ -153,7 +160,7 @@
 
 
 #################################################
-# PLAY 3: INSTALL (MULTI-OS + INCIDENT)
+# PLAY 3: INSTALL (ONLY HERE INCIDENT)
 #################################################
 
 - name: Install Datadog
@@ -166,6 +173,13 @@
     helpdesk_group_id: "679434f053231300e321ddeeff7b12d8"
 
   tasks:
+
+  - meta: end_play
+    when: hostvars['localhost'].global_failed
+
+  #################################################
+  # ALREADY INSTALLED
+  #################################################
 
   - name: Skip if already installed
     when: hostvars['localhost'].datadog_ok
@@ -183,7 +197,7 @@
           body_format: json
           body:
             state: "3"
-            work_notes: "✅ Datadog already installed"
+            work_notes: "✅ Already installed"
 
       - name: Close Request
         delegate_to: localhost
@@ -200,29 +214,29 @@
 
       - meta: end_play
 
+  #################################################
+  # INSTALL BLOCK (MULTI-OS)
+  #################################################
+
   - block:
 
-      #################################################
-      # DEBIAN / UBUNTU
-      #################################################
-
-      - apt:
-          name:
-            - apt-transport-https
-            - curl
-            - gnupg
+      - name: Install deps (Debian)
+        apt:
+          name: [apt-transport-https, curl, gnupg]
           state: present
           update_cache: yes
         when: ansible_os_family == "Debian"
 
-      - shell: |
+      - name: Add key (Debian)
+        shell: |
           curl -fsSL https://keys.datadoghq.com/DATADOG_APT_KEY_CURRENT.public \
           | gpg --dearmor -o /usr/share/keyrings/datadog-archive-keyring.gpg
         args:
           creates: /usr/share/keyrings/datadog-archive-keyring.gpg
         when: ansible_os_family == "Debian"
 
-      - copy:
+      - name: Add repo (Debian)
+        copy:
           dest: /etc/apt/sources.list.d/datadog.list
           content: |
             deb [signed-by=/usr/share/keyrings/datadog-archive-keyring.gpg] https://apt.datadoghq.com/ stable 7
@@ -234,11 +248,8 @@
           update_cache: yes
         when: ansible_os_family == "Debian"
 
-      #################################################
-      # RHEL / AMAZON
-      #################################################
-
-      - copy:
+      - name: Add repo (RHEL)
+        copy:
           dest: /etc/yum.repos.d/datadog.repo
           content: |
             [datadog]
@@ -254,30 +265,28 @@
           state: present
         when: ansible_os_family == "RedHat"
 
-      #################################################
-      # CONFIG
-      #################################################
-
-      - copy:
-          src: /etc/datadog-agent/datadog.yaml.example
-          dest: /etc/datadog-agent/datadog.yaml
-          remote_src: yes
-          force: no
-
-      - blockinfile:
+      - name: Configure Datadog
+        lineinfile:
           path: /etc/datadog-agent/datadog.yaml
-          block: |
-            api_key: {{ datadog_api_key }}
-            site: us5.datadoghq.com
+          regexp: '^api_key:'
+          line: "api_key: {{ datadog_api_key }}"
 
       - service:
           name: datadog-agent
           state: restarted
           enabled: yes
 
+      - set_fact:
+          datadog_ok: true
+
+    #################################################
+    # INSTALL FAILURE → INCIDENT + HARD STOP ✅
+    #################################################
+
     rescue:
 
       - set_fact:
+          global_failed: true
           error_message: "{{ ansible_failed_result.msg }}"
 
       - name: Update RITM failure
@@ -311,11 +320,15 @@
             assignment_group:
               value: "{{ helpdesk_group_id }}"
 
+      #################################################
+      # ✅ HARD GLOBAL STOP
+      #################################################
+
       - meta: end_play
 
 
 #################################################
-# PLAY 4: VERIFY
+# PLAY 4: VERIFY (SKIPPED IF FAIL)
 #################################################
 
 - name: Verify Datadog
@@ -323,6 +336,9 @@
   gather_facts: no
 
   tasks:
+
+  - meta: end_play
+    when: global_failed
 
   - block:
 
@@ -358,7 +374,7 @@
 
 
 #################################################
-# FINAL
+# FINAL SUCCESS
 #################################################
 
 - name: Close Success
@@ -367,25 +383,29 @@
 
   tasks:
 
-    - name: Close RITM
-      uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
-        method: PATCH
-        user: "{{ snow_user }}"
-        password: "{{ snow_password }}"
-        force_basic_auth: yes
-        body_format: json
-        body:
-          state: "3"
-          work_notes: "✅ Installed & verified"
+  - meta: end_play
+    when: global_failed
 
-    - name: Close Request
-      uri:
-        url: "https://{{ servicenow_instance }}/api/now/table/sc_request/{{ request_sys_id }}"
-        method: PATCH
-        user: "{{ snow_user }}"
-        password: "{{ snow_password }}"
-        force_basic_auth: yes
-        body_format: json
-        body:
-          state: "3"
+  - name: Close RITM
+    uri:
+      url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
+      method: PATCH
+      user: "{{ snow_user }}"
+      password: "{{ snow_password }}"
+      force_basic_auth: yes
+      body_format: json
+      body:
+        state: "3"
+        work_notes: "✅ Installed & verified"
+
+  - name: Close Request
+    uri:
+      url: "https://{{ servicenow_instance }}/api/now/table/sc_request/{{ request_sys_id }}"
+      method: PATCH
+      user: "{{ snow_user }}"
+      password: "{{ snow_password }}"
+      force_basic_auth: yes
+      body_format: json
+      body:
+        state: "3"
+

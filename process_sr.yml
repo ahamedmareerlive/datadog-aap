@@ -1,16 +1,15 @@
 ---
 #################################################
-# PLAY 1: FETCH + AWS LOOKUP (WITH ERROR HANDLING)
+# PLAY 1: FETCH + AWS LOOKUP
 #################################################
 
-- name: Fetch RITM and target
+- name: Fetch RITM + AWS lookup
   hosts: localhost
   gather_facts: no
 
   vars:
     servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
     aws_region: "ap-south-1"
-    helpdesk_group_id: "679434f053231300e321ddeeff7b12d8"
 
   tasks:
 
@@ -19,7 +18,6 @@
       - set_fact:
           datadog_ok: false
           global_failed: false
-          error_message: ""
 
       - name: Get latest RITM
         uri:
@@ -66,34 +64,46 @@
         register: ec2_info
 
       - set_fact:
-          matched_instances: >-
-            {{
-              ec2_info.instances
-              | selectattr('tags.Name','search', target_host)
-              | list
-            }}
+          matched_instances: "{{ ec2_info.instances | selectattr('tags.Name','search', target_host) | list }}"
 
       - fail:
           msg: "EC2 not found"
         when: matched_instances | length == 0
 
+      #################################################
+      # ✅ SAFE TAG HANDLING
+      #################################################
+
       - set_fact:
           datadog_host: "{{ matched_instances[0].instance_id }}"
           target_ip: "{{ matched_instances[0].public_ip_address }}"
-          ec2_os: "{{ matched_instances[0].tags.OS | default('amzn') | lower }}"
+          ec2_os: >-
+            {{
+              (
+                matched_instances[0].tags.OS
+                if (matched_instances[0].tags is defined and 'OS' in matched_instances[0].tags)
+                else 'amzn'
+              ) | lower
+            }}
+
+      - set_fact:
           dynamic_user: "{{ 'ubuntu' if ec2_os == 'ubuntu' else 'ec2-user' }}"
 
-      - add_host:
+      - name: Add dynamic host
+        add_host:
           name: dynamic_target
           ansible_host: "{{ target_ip }}"
           ansible_user: "{{ dynamic_user }}"
           groups: dynamic_targets
 
+    #################################################
+    # ❌ NON-INSTALL FAILURE → ONLY UPDATE RITM
+    #################################################
+
     rescue:
 
       - set_fact:
-          global_failed: true
-          error_message: "{{ ansible_failed_result.msg }}"
+          error_message: "{{ ansible_failed_result.msg | default('Unknown error') }}"
 
       - name: Update RITM (Pending)
         uri:
@@ -122,7 +132,8 @@
 
   - block:
 
-      - uri:
+      - name: Check Datadog API
+        uri:
           url: "https://api.us5.datadoghq.com/api/v1/hosts"
           method: GET
           headers:
@@ -145,13 +156,13 @@
           body_format: json
           body:
             state: "2"
-            work_notes: "⚠️ Datadog API check failed"
+            work_notes: "⚠️ Datadog API failure"
 
       - meta: end_play
 
 
 #################################################
-# PLAY 3: INSTALL (ONLY THIS CREATES INCIDENT ✅)
+# PLAY 3: INSTALL (ONLY HERE INCIDENT IS CREATED ✅)
 #################################################
 
 - name: Install Datadog
@@ -164,11 +175,13 @@
 
   tasks:
 
+  #################################################
+  # ✅ ALREADY INSTALLED
+  #################################################
+
   - name: Skip if already installed
     when: hostvars['localhost'].datadog_ok
     block:
-      - debug:
-          msg: "Already installed"
 
       - name: Close RITM
         delegate_to: localhost
@@ -182,9 +195,26 @@
           body_format: json
           body:
             state: "3"
-            work_notes: "✅ Datadog already installed"
+            work_notes: "✅ Already installed"
+
+      - name: Close Request
+        delegate_to: localhost
+        become: false
+        uri:
+          url: "https://{{ servicenow_instance }}/api/now/table/sc_request/{{ hostvars['localhost'].request_sys_id }}"
+          method: PATCH
+          user: "{{ snow_user }}"
+          password: "{{ snow_password }}"
+          force_basic_auth: yes
+          body_format: json
+          body:
+            state: "3"
 
       - meta: end_play
+
+  #################################################
+  # ✅ INSTALL BLOCK
+  #################################################
 
   - block:
 
@@ -203,12 +233,16 @@
           name: datadog-agent
           state: restarted
 
+    #################################################
+    # ❌ INSTALL FAILURE → CREATE INCIDENT
+    #################################################
+
     rescue:
 
       - set_fact:
           error_message: "{{ ansible_failed_result.msg }}"
 
-      - name: Update RITM failure
+      - name: Update RITM
         delegate_to: localhost
         become: false
         uri:
@@ -222,7 +256,7 @@
             state: "-5"
             work_notes: "❌ Install failed: {{ error_message }}"
 
-      - name: Create INCIDENT ✅ ONLY HERE
+      - name: Create INCIDENT ✅
         delegate_to: localhost
         become: false
         uri:
@@ -265,9 +299,6 @@
         delay: 30
         until: datadog_host in (dd_api.json.host_list | map(attribute='host_name') | list)
 
-      - set_fact:
-          datadog_ok: true
-
     rescue:
 
       - name: Update RITM Pending
@@ -296,7 +327,6 @@
   tasks:
 
     - name: Close RITM
-      when: datadog_ok
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_req_item/{{ request_item_sys_id }}"
         method: PATCH
@@ -306,10 +336,9 @@
         body_format: json
         body:
           state: "3"
-          work_notes: "✅ Datadog installed & verified"
+          work_notes: "✅ Installed & verified"
 
     - name: Close Request
-      when: datadog_ok
       uri:
         url: "https://{{ servicenow_instance }}/api/now/table/sc_request/{{ request_sys_id }}"
         method: PATCH
@@ -319,3 +348,4 @@
         body_format: json
         body:
           state: "3"
+

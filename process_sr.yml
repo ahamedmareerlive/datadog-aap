@@ -171,7 +171,7 @@
   gather_facts: no
 
   vars:
-    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
+    servicenow_instance: "dev222810.service-now.com"
 
   tasks:
 
@@ -231,7 +231,7 @@
   gather_facts: yes
 
   vars:
-    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
+    servicenow_instance: "dev222810.service-now.com"
     helpdesk_group_id: "679434f053231300e321ddeeff7b12d8"
 
   tasks:
@@ -419,7 +419,7 @@
   gather_facts: no
 
   vars:
-    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
+    servicenow_instance: "dev222810.service-now.com"
 
   tasks:
 
@@ -507,7 +507,7 @@
   gather_facts: no
 
   vars:
-    servicenow_instance: "nowlearning-nlinst04302549-63gqx-0001.lab.service-now.com"
+    servicenow_instance: "dev222810.service-now.com"
 
   tasks:
 

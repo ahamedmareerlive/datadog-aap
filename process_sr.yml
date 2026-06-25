@@ -8,7 +8,7 @@
   gather_facts: no
 
   vars:
-    servicenow_instance: "https://dev222810.service-now.com"
+    servicenow_instance: "dev222810.service-now.com"
     aws_region: "ap-south-1"
     helpdesk_group_id: "679434f053231300e321ddeeff7b12d8"
     ritm_filter_text: "Datadog"
